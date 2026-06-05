@@ -8,11 +8,11 @@ import ta
 # ==================================================
 
 st.set_page_config(
-    page_title="AI Trading Engine",
+    page_title="AI Trading Hunter",
     layout="wide"
 )
 
-st.title("🤖 AI Trading Engine")
+st.title("🤖 AI Trading Hunter")
 
 # ==================================================
 # SETTINGS
