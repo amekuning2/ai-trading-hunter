@@ -2,7 +2,6 @@ import streamlit as st
 import requests
 import pandas as pd
 import ta
-session = requests.Session()
 
 # ==================================================
 # CONFIG
@@ -13,16 +12,6 @@ st.set_page_config(
     layout="wide"
 )
 
-try:
-    test = session.get(
-        "https://fapi.binance.com/fapi/v1/time",
-        timeout=10
-    )
-
-    st.success("🟢 Binance Futures Connected")
-
-except Exception as e:
-    st.error(f"🔴 Binance Error: {e}")
 st.title("🤖 AI Trading Hunter")
 
 # ==================================================
@@ -42,13 +31,12 @@ ASSETS = [
     "LINKUSDT"
 ]
 
-TIMEFRAME = "15m"
+TIMEFRAME = "5m"
 
 # ==================================================
 # FUNCTIONS
 # ==================================================
 
-@st.cache_data(ttl=60)
 def get_market_data(symbol):
 
     url = (
@@ -58,7 +46,7 @@ def get_market_data(symbol):
         f"&limit=250"
     )
 
-    response = session.get(url, timeout=20)
+    response = requests.get(url, timeout=10)
 
     data = response.json()
 
