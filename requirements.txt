@@ -2,4 +2,5 @@ streamlit
 pandas
 requests
 ta
-MetaTrader5
+python-binance
+plotly
