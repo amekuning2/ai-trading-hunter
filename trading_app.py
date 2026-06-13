@@ -410,6 +410,16 @@ if not api_key or not api_secret:
     """, unsafe_allow_html=True)
     st.stop()
 
+# Mobile-friendly pair selector
+col_sel1, col_sel2 = st.columns([2,1])
+with col_sel1:
+    DEFAULT_PAIRS = ["BTCUSDT", "ETHUSDT", "BNBUSDT", "SOLUSDT", "XRPUSDT", "DOGEUSDT"]
+    symbol = st.selectbox("🪙 Select Pair", DEFAULT_PAIRS)
+with col_sel2:
+    custom = st.text_input("Custom pair", placeholder="e.g. ADAUSDT")
+    if custom:
+        symbol = custom.upper()
+        
 # Tabs
 tab1, tab2 = st.tabs(["📊 Dashboard", "🔥 Top Gainers"])
 
