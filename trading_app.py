@@ -776,9 +776,13 @@ with tab3:
 #  AUTO REFRESH
 # ─────────────────────────────────────────────
 if auto_refresh:
-    if alert_active:
+    time.sleep(30)
+    if alert_active and ntfy_topic and alert_price > 0:
         price_now = get_price(alert_symbol, api_key, api_secret)
         if price_now:
-            check_alert(price_now["price"], alert_price, alert_type, alert_symbol, ntfy_topic)
-    time.sleep(30)
+            current = price_now["price"]
+            if alert_type == "Above" and current >= alert_price:
+                send_ntfy(ntfy_topic, f"🚨 {alert_symbol} ALERT!", f"{alert_symbol} tembus ${current:,.4f} (target: ${alert_price:,.4f})")
+            elif alert_type == "Below" and current <= alert_price:
+                send_ntfy(ntfy_topic, f"🚨 {alert_symbol} ALERT!", f"{alert_symbol} turun ke ${current:,.4f} (target: ${alert_price:,.4f})")
     st.rerun()
