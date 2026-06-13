@@ -419,7 +419,7 @@ with col_sel2:
     custom = st.text_input("Custom pair", placeholder="e.g. ADAUSDT")
     if custom:
         symbol = custom.upper()
-        
+
 # Tabs
 tab1, tab2 = st.tabs(["📊 Dashboard", "🔥 Top Gainers"])
 
