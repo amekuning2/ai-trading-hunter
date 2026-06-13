@@ -775,14 +775,26 @@ with tab3:
 # ─────────────────────────────────────────────
 #  AUTO REFRESH
 # ─────────────────────────────────────────────
+# Save alert to session state
+if alert_active:
+    st.session_state["alert_active"] = True
+    st.session_state["alert_price"] = alert_price
+    st.session_state["alert_type"] = alert_type
+    st.session_state["alert_symbol"] = alert_symbol
+    st.session_state["ntfy_topic"] = ntfy_topic
+
 if auto_refresh:
     time.sleep(30)
-    if alert_active and ntfy_topic and alert_price > 0:
-        price_now = get_price(alert_symbol, api_key, api_secret)
+    if st.session_state.get("alert_active") and st.session_state.get("ntfy_topic") and st.session_state.get("alert_price", 0) > 0:
+        price_now = get_price(st.session_state["alert_symbol"], api_key, api_secret)
         if price_now:
             current = price_now["price"]
-            if alert_type == "Above" and current >= alert_price:
-                send_ntfy(ntfy_topic, f"🚨 {alert_symbol} ALERT!", f"{alert_symbol} tembus ${current:,.4f} (target: ${alert_price:,.4f})")
-            elif alert_type == "Below" and current <= alert_price:
-                send_ntfy(ntfy_topic, f"🚨 {alert_symbol} ALERT!", f"{alert_symbol} turun ke ${current:,.4f} (target: ${alert_price:,.4f})")
+            a_type = st.session_state["alert_type"]
+            a_price = st.session_state["alert_price"]
+            a_symbol = st.session_state["alert_symbol"]
+            a_topic = st.session_state["ntfy_topic"]
+            if a_type == "Above" and current >= a_price:
+                send_ntfy(a_topic, f"🚨 {a_symbol} ALERT!", f"{a_symbol} tembus ${current:,.4f} (target: ${a_price:,.4f})")
+            elif a_type == "Below" and current <= a_price:
+                send_ntfy(a_topic, f"🚨 {a_symbol} ALERT!", f"{a_symbol} turun ke ${current:,.4f} (target: ${a_price:,.4f})")
     st.rerun()
