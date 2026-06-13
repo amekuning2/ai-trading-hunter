@@ -368,13 +368,9 @@ with st.sidebar:
     st.markdown("---")
 
     st.markdown('<p class="section-header">API Configuration</p>', unsafe_allow_html=True)
-    try:
-        api_key = st.secrets["API_KEY"]
-        api_secret = st.secrets["SECRET_KEY"]
-    except:
-        api_key = st.text_input("API Key", type="password", placeholder="Binance API Key")
-        api_secret = st.text_input("Secret Key", type="password", placeholder="Binance Secret Key")
-
+    api_key = "gXdeG9XPTBWlgG61uQxgMPojWqFTiQo9pCBQlvIqt1cKDVC9WlTlxlc1D1sJHHLt"
+    api_secret = "SWpV7Y77IhF0Da4plubMVOMILnpWY9Qd2AOLi2D1Qp4oBe3tuguXUkjPdQ527UkS"
+    
     st.markdown("---")
     st.markdown('<p class="section-header">Trading Pair</p>', unsafe_allow_html=True)
 
