@@ -463,6 +463,28 @@ def build_chart(df, symbol, resistances=[], supports=[]):
     return fig
 
 # ─────────────────────────────────────────────
+#  PRICE ALERT
+# ─────────────────────────────────────────────
+def send_ntfy(topic, title, message, priority="high"):
+    try:
+        import requests
+        requests.post(
+            f"https://ntfy.sh/{topic}",
+            data=message.encode("utf-8"),
+            headers={"Title": title, "Priority": priority, "Tags": "chart_increasing"}
+        )
+    except:
+        pass
+
+def check_alert(current_price, alert_price, alert_type, alert_symbol, ntfy_topic):
+    if alert_price <= 0 or not ntfy_topic:
+        return
+    if alert_type == "Above" and current_price >= alert_price:
+        send_ntfy(ntfy_topic, f"🚨 {alert_symbol} Price Alert!", f"{alert_symbol} udah tembus ${current_price:,.4f} (target: ${alert_price:,.4f})")
+    elif alert_type == "Below" and current_price <= alert_price:
+        send_ntfy(ntfy_topic, f"🚨 {alert_symbol} Price Alert!", f"{alert_symbol} udah turun ke ${current_price:,.4f} (target: ${alert_price:,.4f})")
+
+# ─────────────────────────────────────────────
 #  SIDEBAR
 # ─────────────────────────────────────────────
 with st.sidebar:
@@ -497,7 +519,15 @@ with st.sidebar:
     auto_refresh = st.checkbox("Auto Refresh (30s)", value=False)
 
     st.markdown("---")
-    st.caption("v1.0 · Binance · Read Only")
+    st.markdown('<p class="section-header">Price Alert</p>', unsafe_allow_html=True)
+    ntfy_topic = st.text_input("ntfy Topic", placeholder="trading-amekuning")
+    alert_symbol = st.selectbox("Alert Pair", ["BTCUSDT", "ETHUSDT", "BNBUSDT", "SOLUSDT", "XRPUSDT", "DOGEUSDT"])
+    alert_price = st.number_input("Target Price (USD)", min_value=0.0, value=0.0, format="%.4f")
+    alert_type = st.radio("Alert Type", ["Above", "Below"])
+    alert_active = st.checkbox("Activate Alert", value=False)
+
+    st.markdown("---")
+    st.caption("v2.0 · Binance · Multi-TF")
 
 # ─────────────────────────────────────────────
 #  MAIN CONTENT
@@ -746,5 +776,9 @@ with tab3:
 #  AUTO REFRESH
 # ─────────────────────────────────────────────
 if auto_refresh:
+    if alert_active:
+        price_now = get_price(alert_symbol, api_key, api_secret)
+        if price_now:
+            check_alert(price_now["price"], alert_price, alert_type, alert_symbol, ntfy_topic)
     time.sleep(30)
     st.rerun()
