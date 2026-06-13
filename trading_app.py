@@ -115,6 +115,37 @@ st.markdown("""
 
     /* Plotly chart background */
     .js-plotly-plot { border-radius: 8px; }
+
+    /* MTF Cards */
+    .mtf-card {
+        background: #161b22;
+        border: 1px solid #30363d;
+        border-radius: 8px;
+        padding: 12px;
+        text-align: center;
+        margin: 4px 0;
+    }
+    .mtf-buy { border-left: 3px solid #3fb950; }
+    .mtf-sell { border-left: 3px solid #f85149; }
+    .mtf-hold { border-left: 3px solid #388bfd; }
+
+    /* Strength bar */
+    .strength-bar-container {
+        background: #21262d;
+        border-radius: 20px;
+        height: 8px;
+        margin: 8px 0;
+        overflow: hidden;
+    }
+    .strength-bar-fill {
+        height: 100%;
+        border-radius: 20px;
+    }
+
+    /* Support Resistance */
+    .sr-level { display: flex; justify-content: space-between; padding: 6px 10px; border-radius: 6px; margin: 3px 0; font-size: 12px; }
+    .sr-resistance { background: #2d1b1b; border-left: 3px solid #f85149; }
+    .sr-support { background: #0d2b1d; border-left: 3px solid #3fb950; }
 </style>
 """, unsafe_allow_html=True)
 
@@ -258,6 +289,31 @@ def calculate_signal(df):
         sell_score += 1
         signals["EMA"] = ("DOWNTREND", "red")
 
+    # Stochastic
+    stoch = ta.momentum.StochasticOscillator(high, low, close)
+    stoch_k = stoch.stoch().iloc[-1]
+    stoch_d = stoch.stoch_signal().iloc[-1]
+    if stoch_k < 20 and stoch_k > stoch_d:
+        buy_score += 2
+        signals["STOCH"] = ("OVERSOLD CROSS", "green")
+    elif stoch_k > 80 and stoch_k < stoch_d:
+        sell_score += 2
+        signals["STOCH"] = ("OVERBOUGHT CROSS", "red")
+    else:
+        signals["STOCH"] = ("NEUTRAL", "neutral")
+
+    # EMA200
+    if len(close) >= 200:
+        ema200 = ta.trend.EMAIndicator(close, window=200).ema_indicator().iloc[-1]
+        if ema20 > ema50 > ema200:
+            buy_score += 1
+            signals["EMA"] = ("STRONG UPTREND", "green")
+        elif ema20 < ema50 < ema200:
+            sell_score += 1
+            signals["EMA"] = ("STRONG DOWNTREND", "red")
+    else:
+        ema200 = ema50
+
     # Volume surge boosts signal
     if vol_surge:
         signals["VOL"] = ("SURGE ⚡", "green")
@@ -268,35 +324,73 @@ def calculate_signal(df):
     else:
         signals["VOL"] = ("NORMAL", "neutral")
 
+    # Strength
+    total_score = buy_score + sell_score
+    strength = int((max(buy_score, sell_score) / max(total_score, 1)) * 100)
+
     # Decision
     indicators = {
         "RSI": round(rsi, 2),
         "MACD": round(macd, 6),
-        "BB_pos": round((current_price - bb_lower) / (bb_upper - bb_lower) * 100, 1),
+        "Stoch %K": round(stoch_k, 2),
+        "BB_pos": round((current_price - bb_lower) / max(bb_upper - bb_lower, 0.0001) * 100, 1),
         "EMA20": round(ema20, 4),
         "EMA50": round(ema50, 4),
+        "EMA200": round(ema200, 4),
     }
 
     if buy_score >= 5:
         reason = f"Strong buy signal — {buy_score} bullish indicators"
-        return "BUY", reason, signals, indicators
+        return "BUY", reason, signals, indicators, strength
     elif sell_score >= 5:
         reason = f"Strong sell signal — {sell_score} bearish indicators"
-        return "SELL", reason, signals, indicators
+        return "SELL", reason, signals, indicators, strength
     elif buy_score > sell_score:
         reason = f"Weak buy signal — {buy_score} vs {sell_score} indicators"
-        return "BUY", reason, signals, indicators
+        return "BUY", reason, signals, indicators, strength
     elif sell_score > buy_score:
         reason = f"Weak sell signal — {sell_score} vs {buy_score} indicators"
-        return "SELL", reason, signals, indicators
+        return "SELL", reason, signals, indicators, strength
     else:
         reason = "Mixed signals — market indecisive"
-        return "HOLD", reason, signals, indicators
+        return "HOLD", reason, signals, indicators, strength
+
+# ─────────────────────────────────────────────
+#  MULTI TIMEFRAME ANALYSIS
+# ─────────────────────────────────────────────
+def multi_timeframe_analysis(symbol, api_key, api_secret):
+    timeframes = [("1H", "1h", 100), ("4H", "4h", 100), ("1D", "1d", 200)]
+    results = []
+    for label, interval, limit in timeframes:
+        df = get_klines(symbol, interval, limit, api_key, api_secret)
+        signal, reason, _, _, strength = calculate_signal(df)
+        results.append((label, signal, reason, strength))
+    return results
+
+# ─────────────────────────────────────────────
+#  SUPPORT & RESISTANCE
+# ─────────────────────────────────────────────
+def get_support_resistance(df, n=3):
+    if df is None or len(df) < 20:
+        return [], []
+    highs = df["high"].rolling(5, center=True).max()
+    lows = df["low"].rolling(5, center=True).min()
+    resistance_levels = []
+    support_levels = []
+    current_price = df["close"].iloc[-1]
+    for i in range(len(df)):
+        if df["high"].iloc[i] == highs.iloc[i]:
+            resistance_levels.append(df["high"].iloc[i])
+        if df["low"].iloc[i] == lows.iloc[i]:
+            support_levels.append(df["low"].iloc[i])
+    resistance_levels = sorted(set([round(r, 4) for r in resistance_levels if r > current_price]))[:n]
+    support_levels = sorted(set([round(s, 4) for s in support_levels if s < current_price]), reverse=True)[:n]
+    return resistance_levels, support_levels
 
 # ─────────────────────────────────────────────
 #  CHART
 # ─────────────────────────────────────────────
-def build_chart(df, symbol):
+def build_chart(df, symbol, resistances=[], supports=[]):
     fig = make_subplots(
         rows=3, cols=1,
         shared_xaxes=True,
@@ -331,6 +425,14 @@ def build_chart(df, symbol):
     fig.add_trace(go.Scatter(x=df["timestamp"], y=bb.bollinger_lband(),
         name="BB Lower", line=dict(color="#8b949e", width=1, dash="dash"),
         fill="tonexty", fillcolor="rgba(139,148,158,0.05)", showlegend=False), row=1, col=1)
+
+    # Support & Resistance lines
+    for r in resistances:
+        fig.add_hline(y=r, line_dash="dash", line_color="#f85149", opacity=0.6, row=1, col=1,
+                      annotation_text=f"R {r:,.4f}", annotation_position="right")
+    for s in supports:
+        fig.add_hline(y=s, line_dash="dash", line_color="#3fb950", opacity=0.6, row=1, col=1,
+                      annotation_text=f"S {s:,.4f}", annotation_position="right")
 
     # Volume
     colors = ["#3fb950" if df["close"].iloc[i] >= df["open"].iloc[i] else "#f85149"
@@ -421,7 +523,7 @@ with col_sel2:
         symbol = custom.upper()
 
 # Tabs
-tab1, tab2 = st.tabs(["📊 Dashboard", "🔥 Top Gainers"])
+tab1, tab2, tab3 = st.tabs(["📊 Dashboard", "🕐 Multi-Timeframe", "🔥 Top Gainers"])
 
 # ─── TAB 1: DASHBOARD ───
 with tab1:
@@ -481,8 +583,9 @@ with tab1:
     with col_chart:
         st.markdown('<p class="section-header">Price Chart</p>', unsafe_allow_html=True)
         df = get_klines(symbol, interval_val, candles, api_key, api_secret)
+        resistances, supports = get_support_resistance(df)
         if df is not None:
-            fig = build_chart(df, symbol)
+            fig = build_chart(df, symbol, resistances, supports)
             st.plotly_chart(fig, use_container_width=True)
         else:
             st.error("Gagal load chart data")
@@ -496,14 +599,20 @@ with tab1:
             reason = result[1]
             signals = result[2]
             indicators = result[3] if len(result) > 3 else {}
+            strength = result[4] if len(result) > 4 else 50
 
             signal_class = f"signal-{signal.lower()}"
             signal_emoji = "🟢" if signal == "BUY" else "🔴" if signal == "SELL" else "🔵"
+            strength_color = "#3fb950" if signal == "BUY" else "#f85149" if signal == "SELL" else "#388bfd"
 
             st.markdown(f"""
             <div class="{signal_class}">
                 <p class="signal-text">{signal_emoji} {signal}</p>
                 <p class="signal-reason">{reason}</p>
+                <div class="strength-bar-container">
+                    <div class="strength-bar-fill" style="width:{strength}%; background:{strength_color};"></div>
+                </div>
+                <p style="color:#8b949e; font-size:11px;">Strength: {strength}%</p>
             </div>
             """, unsafe_allow_html=True)
 
@@ -528,8 +637,77 @@ with tab1:
                     </div>
                     """, unsafe_allow_html=True)
 
-# ─── TAB 2: TOP GAINERS ───
+            # Support & Resistance
+            price = price_data["price"]
+            st.markdown("<br>", unsafe_allow_html=True)
+            st.markdown('<p class="section-header">Support & Resistance</p>', unsafe_allow_html=True)
+            for r in resistances:
+                st.markdown(f'<div class="sr-level sr-resistance"><span style="color:#8b949e;">Resistance</span><span style="color:#f85149; font-weight:700;">${r:,.4f}</span></div>', unsafe_allow_html=True)
+            st.markdown(f'<div style="text-align:center; padding:4px; color:#e6edf3; font-size:12px; font-weight:700;">── Now: ${price:,.4f} ──</div>', unsafe_allow_html=True)
+            for s in supports:
+                st.markdown(f'<div class="sr-level sr-support"><span style="color:#8b949e;">Support</span><span style="color:#3fb950; font-weight:700;">${s:,.4f}</span></div>', unsafe_allow_html=True)
+
+# ─── TAB 2: MULTI TIMEFRAME ───
 with tab2:
+    st.markdown('<p class="section-header">🕐 Multi-Timeframe Analysis</p>', unsafe_allow_html=True)
+    st.markdown(f"<p style='color:#8b949e; font-size:13px;'>Analisis {symbol} dari 3 timeframe sekaligus</p>", unsafe_allow_html=True)
+
+    with st.spinner("Menganalisis semua timeframe..."):
+        mtf_results = multi_timeframe_analysis(symbol, api_key, api_secret)
+
+    buy_count = sum(1 for _, s, _, _ in mtf_results if s == "BUY")
+    sell_count = sum(1 for _, s, _, _ in mtf_results if s == "SELL")
+    hold_count = sum(1 for _, s, _, _ in mtf_results if s == "HOLD")
+
+    if buy_count >= 2:
+        consensus_color = "#3fb950"; consensus_emoji = "🟢"
+        consensus_text = "STRONG BUY" if buy_count == 3 else "BUY"
+    elif sell_count >= 2:
+        consensus_color = "#f85149"; consensus_emoji = "🔴"
+        consensus_text = "STRONG SELL" if sell_count == 3 else "SELL"
+    else:
+        consensus_color = "#388bfd"; consensus_emoji = "🔵"
+        consensus_text = "MIXED / HOLD"
+
+    st.markdown(f"""
+    <div style="background:#161b22; border:1px solid #30363d; border-radius:12px; padding:24px; text-align:center; margin-bottom:24px;">
+        <p style="color:#8b949e; font-size:12px; text-transform:uppercase; letter-spacing:2px; margin:0;">MTF Consensus</p>
+        <p style="font-size:36px; font-weight:800; color:{consensus_color}; margin:8px 0;">{consensus_emoji} {consensus_text}</p>
+        <p style="color:#8b949e; font-size:12px;">{buy_count} BUY · {sell_count} SELL · {hold_count} HOLD</p>
+    </div>
+    """, unsafe_allow_html=True)
+
+    col_mtf1, col_mtf2, col_mtf3 = st.columns(3)
+    cols = [col_mtf1, col_mtf2, col_mtf3]
+    for i, (label, signal, reason, strength) in enumerate(mtf_results):
+        color = "#3fb950" if signal == "BUY" else "#f85149" if signal == "SELL" else "#388bfd"
+        emoji = "🟢" if signal == "BUY" else "🔴" if signal == "SELL" else "🔵"
+        with cols[i]:
+            st.markdown(f"""
+            <div class="mtf-card mtf-{signal.lower()}">
+                <p style="color:#8b949e; font-size:11px; text-transform:uppercase; letter-spacing:1px; margin:0;">{label}</p>
+                <p style="font-size:22px; font-weight:800; color:{color}; margin:8px 0;">{emoji} {signal}</p>
+                <div class="strength-bar-container">
+                    <div class="strength-bar-fill" style="width:{strength}%; background:{color};"></div>
+                </div>
+                <p style="color:#8b949e; font-size:11px; margin:4px 0;">Strength: {strength}%</p>
+                <p style="color:#8b949e; font-size:11px; margin:0;">{reason}</p>
+            </div>
+            """, unsafe_allow_html=True)
+
+    st.markdown("<br>", unsafe_allow_html=True)
+    st.markdown("""
+    <div style="background:#161b22; border:1px solid #30363d; border-radius:8px; padding:16px;">
+        <p style="color:#8b949e; font-size:12px; margin:0;">
+        💡 <strong style="color:#e6edf3;">Cara baca MTF:</strong> Kalau 1H + 4H + 1D semua BUY → sinyal sangat kuat.
+        Kalau 1H BUY tapi 4H/1D SELL → hati-hati, bisa false signal.
+        Konfirmasi minimal 2 dari 3 timeframe sebelum entry.
+        </p>
+    </div>
+    """, unsafe_allow_html=True)
+
+# ─── TAB 3: TOP GAINERS ───
+with tab3:
     st.markdown('<p class="section-header">🔥 Top 10 Gainers Today</p>', unsafe_allow_html=True)
 
     gainers = get_top_gainers(api_key, api_secret, n=10)
