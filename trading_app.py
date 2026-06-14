@@ -16,7 +16,7 @@ st.set_page_config(
     page_title="AI Trading Dashboard",
     page_icon="📈",
     layout="wide",
-    initial_sidebar_state="expanded"
+    initial_sidebar_state="collapsed"
 )
 
 # ─────────────────────────────────────────────
@@ -463,89 +463,28 @@ def build_chart(df, symbol, resistances=[], supports=[]):
     return fig
 
 # ─────────────────────────────────────────────
-#  PRICE ALERT
+#  SESSION STATE DEFAULTS
 # ─────────────────────────────────────────────
-def send_ntfy(topic, title, message, priority="high"):
-    try:
-        import requests
-        requests.post(
-            f"https://ntfy.sh/{topic}",
-            data=message.encode("utf-8"),
-            headers={"Title": title, "Priority": priority, "Tags": "chart_increasing"}
-        )
-    except:
-        pass
+if "symbol" not in st.session_state:
+    st.session_state["symbol"] = "BTCUSDT"
+if "interval_val" not in st.session_state:
+    st.session_state["interval_val"] = "1h"
+if "candles" not in st.session_state:
+    st.session_state["candles"] = 200
+if "auto_refresh" not in st.session_state:
+    st.session_state["auto_refresh"] = False
 
-def check_alert(current_price, alert_price, alert_type, alert_symbol, ntfy_topic):
-    if alert_price <= 0 or not ntfy_topic:
-        return
-    if alert_type == "Above" and current_price >= alert_price:
-        send_ntfy(ntfy_topic, f"🚨 {alert_symbol} Price Alert!", f"{alert_symbol} udah tembus ${current_price:,.4f} (target: ${alert_price:,.4f})")
-    elif alert_type == "Below" and current_price <= alert_price:
-        send_ntfy(ntfy_topic, f"🚨 {alert_symbol} Price Alert!", f"{alert_symbol} udah turun ke ${current_price:,.4f} (target: ${alert_price:,.4f})")
-
-# ─────────────────────────────────────────────
-#  SIDEBAR
-# ─────────────────────────────────────────────
-with st.sidebar:
-    st.markdown("### ⚡ AI Trading Dashboard")
-    st.markdown("---")
-
-    st.markdown('<p class="section-header">API Configuration</p>', unsafe_allow_html=True)
-    api_key = "gXdeG9XPTBWlgG61uQxgMPojWqFTiQo9pCBQlvIqt1cKDVC9WlTlxlc1D1sJHHLt"
-    api_secret = "SWpV7Y77IhF0Da4plubMVOMILnpWY9Qd2AOLi2D1Qp4oBe3tuguXUkjPdQ527UkS"
-    
-    st.markdown("---")
-    st.markdown('<p class="section-header">Trading Pair</p>', unsafe_allow_html=True)
-
-    DEFAULT_PAIRS = ["BTCUSDT", "ETHUSDT", "BNBUSDT", "SOLUSDT", "XRPUSDT", "DOGEUSDT"]
-    symbol = st.selectbox("Select Pair", DEFAULT_PAIRS)
-
-    custom = st.text_input("Or custom pair", placeholder="e.g. ADAUSDT")
-    if custom:
-        symbol = custom.upper()
-
-    st.markdown("---")
-    st.markdown('<p class="section-header">Chart Settings</p>', unsafe_allow_html=True)
-
-    interval = st.selectbox("Timeframe", [
-        ("1 Minute", "1m"), ("5 Minutes", "5m"), ("15 Minutes", "15m"),
-        ("1 Hour", "1h"), ("4 Hours", "4h"), ("1 Day", "1d")
-    ], format_func=lambda x: x[0], index=3)
-    interval_val = interval[1]
-
-    candles = st.slider("Candles", 50, 500, 200)
-
-    auto_refresh = st.checkbox("Auto Refresh (30s)", value=False)
-
-    st.markdown("---")
-    st.markdown('<p class="section-header">Price Alert</p>', unsafe_allow_html=True)
-    ntfy_topic = st.text_input("ntfy Topic", placeholder="trading-amekuning")
-    alert_symbol = st.selectbox("Alert Pair", ["BTCUSDT", "ETHUSDT", "BNBUSDT", "SOLUSDT", "XRPUSDT", "DOGEUSDT"])
-    alert_price = st.number_input("Target Price (USD)", min_value=0.0, value=0.0, format="%.4f")
-    alert_type = st.radio("Alert Type", ["Above", "Below"])
-    alert_active = st.checkbox("Activate Alert", value=False)
-
-    st.markdown("---")
-    st.caption("v2.0 · Binance · Multi-TF")
+api_key = "gXdeG9XPTBWlgG61uQxgMPojWqFTiQo9pCBQlvIqt1cKDVC9WlTlxlc1D1sJHHLt"
+api_secret = "SWpV7Y77IhF0Da4plubMVOMILnpWY9Qd2AOLi2D1Qp4oBe3tuguXUkjPdQ527UkS"
 
 # ─────────────────────────────────────────────
 #  MAIN CONTENT
 # ─────────────────────────────────────────────
-if not api_key or not api_secret:
-    st.markdown("""
-    <div style="text-align:center; padding: 80px 20px;">
-        <div style="font-size:48px; margin-bottom:16px;">📈</div>
-        <h2 style="color:#e6edf3; margin-bottom:8px;">AI Trading Dashboard</h2>
-        <p style="color:#8b949e;">Masukkan Binance API Key di sidebar untuk mulai</p>
-    </div>
-    """, unsafe_allow_html=True)
-    st.stop()
 
 # Mobile-friendly pair selector
+DEFAULT_PAIRS = ["BTCUSDT", "ETHUSDT", "BNBUSDT", "SOLUSDT", "XRPUSDT", "DOGEUSDT"]
 col_sel1, col_sel2 = st.columns([2,1])
 with col_sel1:
-    DEFAULT_PAIRS = ["BTCUSDT", "ETHUSDT", "BNBUSDT", "SOLUSDT", "XRPUSDT", "DOGEUSDT"]
     symbol = st.selectbox("🪙 Select Pair", DEFAULT_PAIRS)
 with col_sel2:
     custom = st.text_input("Custom pair", placeholder="e.g. ADAUSDT")
@@ -553,10 +492,21 @@ with col_sel2:
         symbol = custom.upper()
 
 # Tabs
-tab1, tab2, tab3 = st.tabs(["📊 Dashboard", "🕐 Multi-Timeframe", "🔥 Top Gainers"])
+tab1, tab2, tab3, tab4 = st.tabs(["📊 Dashboard", "🕐 Multi-Timeframe", "🔥 Top Gainers", "⚙️ Settings"])
 
 # ─── TAB 1: DASHBOARD ───
 with tab1:
+    # Chart settings inline
+    col_tf, col_candle = st.columns([2,1])
+    with col_tf:
+        interval = st.selectbox("⏱ Timeframe", [
+            ("1 Minute","1m"),("5 Minutes","5m"),("15 Minutes","15m"),
+            ("1 Hour","1h"),("4 Hours","4h"),("1 Day","1d")
+        ], format_func=lambda x: x[0], index=3)
+        interval_val = interval[1]
+    with col_candle:
+        candles = st.slider("Candles", 50, 500, 200)
+
     price_data = get_price(symbol, api_key, api_secret)
 
     if price_data is None:
@@ -772,29 +722,34 @@ with tab3:
     else:
         st.info("Gagal load data gainers. Cek koneksi API.")
 
+# ─── TAB 4: SETTINGS ───
+with tab4:
+    st.markdown('<p class="section-header">⚙️ Settings</p>', unsafe_allow_html=True)
+
+    st.markdown("**🔄 Auto Refresh**")
+    auto_refresh = st.checkbox("Auto Refresh setiap 30 detik", value=st.session_state["auto_refresh"])
+    st.session_state["auto_refresh"] = auto_refresh
+    if auto_refresh:
+        st.success("✅ Auto refresh aktif — data update tiap 30 detik")
+    else:
+        st.info("ℹ️ Auto refresh nonaktif")
+
+    st.markdown("---")
+    st.markdown("**ℹ️ App Info**")
+    st.markdown(f"""
+    <div style="background:#161b22; border:1px solid #30363d; border-radius:8px; padding:16px;">
+        <p style="color:#8b949e; font-size:12px; margin:0;">
+        Version: <span style="color:#e6edf3;">v2.0</span><br>
+        Exchange: <span style="color:#e6edf3;">Binance Spot</span><br>
+        Features: <span style="color:#e6edf3;">Multi-TF · S&R · Stochastic · EMA200</span><br>
+        Status: <span style="color:#3fb950;">🟢 Running</span>
+        </p>
+    </div>
+    """, unsafe_allow_html=True)
+
 # ─────────────────────────────────────────────
 #  AUTO REFRESH
 # ─────────────────────────────────────────────
-# Save alert to session state
-if alert_active:
-    st.session_state["alert_active"] = True
-    st.session_state["alert_price"] = alert_price
-    st.session_state["alert_type"] = alert_type
-    st.session_state["alert_symbol"] = alert_symbol
-    st.session_state["ntfy_topic"] = ntfy_topic
-
-if auto_refresh:
+if st.session_state.get("auto_refresh"):
     time.sleep(30)
-    if st.session_state.get("alert_active") and st.session_state.get("ntfy_topic") and st.session_state.get("alert_price", 0) > 0:
-        price_now = get_price(st.session_state["alert_symbol"], api_key, api_secret)
-        if price_now:
-            current = price_now["price"]
-            a_type = st.session_state["alert_type"]
-            a_price = st.session_state["alert_price"]
-            a_symbol = st.session_state["alert_symbol"]
-            a_topic = st.session_state["ntfy_topic"]
-            if a_type == "Above" and current >= a_price:
-                send_ntfy(a_topic, f"🚨 {a_symbol} ALERT!", f"{a_symbol} tembus ${current:,.4f} (target: ${a_price:,.4f})")
-            elif a_type == "Below" and current <= a_price:
-                send_ntfy(a_topic, f"🚨 {a_symbol} ALERT!", f"{a_symbol} turun ke ${current:,.4f} (target: ${a_price:,.4f})")
     st.rerun()
