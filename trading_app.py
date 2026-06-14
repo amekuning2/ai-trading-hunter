@@ -146,28 +146,6 @@ st.markdown("""
     .sr-level { display: flex; justify-content: space-between; padding: 6px 10px; border-radius: 6px; margin: 3px 0; font-size: 12px; }
     .sr-resistance { background: #2d1b1b; border-left: 3px solid #f85149; }
     .sr-support { background: #0d2b1d; border-left: 3px solid #3fb950; }
-
-    /* Trading Plan */
-    .tp-card {
-        background: #161b22;
-        border: 1px solid #30363d;
-        border-radius: 10px;
-        padding: 16px;
-        margin: 8px 0;
-    }
-    .tp-row {
-        display: flex;
-        justify-content: space-between;
-        padding: 6px 0;
-        border-bottom: 1px solid #21262d;
-        font-size: 13px;
-    }
-    .tp-row:last-child { border-bottom: none; }
-    .tp-label { color: #8b949e; }
-    .tp-value { color: #e6edf3; font-weight: 600; }
-    .tp-green { color: #3fb950 !important; }
-    .tp-red { color: #f85149 !important; }
-    .tp-yellow { color: #f0883e !important; }
 </style>
 """, unsafe_allow_html=True)
 
@@ -410,71 +388,8 @@ def get_support_resistance(df, n=3):
     return resistance_levels, support_levels
 
 # ─────────────────────────────────────────────
-#  TRADING PLAN GENERATOR
+#  CHART
 # ─────────────────────────────────────────────
-def generate_trading_plan(df, price_data, signal, supports, resistances, modal_usdt=100):
-    current_price = price_data["price"]
-    high_24h = price_data["high"]
-    low_24h = price_data["low"]
-
-    if df is None or len(df) < 20:
-        return None
-
-    atr = ta.volatility.AverageTrueRange(df["high"], df["low"], df["close"], window=14).average_true_range().iloc[-1]
-
-    if signal == "BUY":
-        entry = round(current_price * 0.999, 4)
-        sl = round(entry - (atr * 1.5), 4)
-        tp1 = round(entry + (atr * 2), 4)
-        tp2 = round(entry + (atr * 3.5), 4)
-        tp3 = round(entry + (atr * 5), 4)
-        if supports:
-            sl = min(sl, round(supports[0] * 0.998, 4))
-        if resistances:
-            tp1 = min(tp1, round(resistances[0] * 0.999, 4))
-
-    elif signal == "SELL":
-        entry = round(current_price * 1.001, 4)
-        sl = round(entry + (atr * 1.5), 4)
-        tp1 = round(entry - (atr * 2), 4)
-        tp2 = round(entry - (atr * 3.5), 4)
-        tp3 = round(entry - (atr * 5), 4)
-        if resistances:
-            sl = max(sl, round(resistances[0] * 1.002, 4))
-        if supports:
-            tp1 = max(tp1, round(supports[0] * 1.001, 4))
-    else:
-        return None
-
-    sl_pct = abs((sl - entry) / entry * 100)
-    tp1_pct = abs((tp1 - entry) / entry * 100)
-    tp2_pct = abs((tp2 - entry) / entry * 100)
-    rr_ratio = round(tp1_pct / sl_pct, 2) if sl_pct > 0 else 0
-
-    qty = round(modal_usdt / entry, 6)
-
-    profit_tp1 = round((tp1 - entry) * qty if signal == "BUY" else (entry - tp1) * qty, 2)
-    profit_tp2 = round((tp2 - entry) * qty if signal == "BUY" else (entry - tp2) * qty, 2)
-    loss_sl = round(abs((sl - entry) * qty), 2)
-
-    return {
-        "signal": signal,
-        "entry": entry,
-        "sl": sl,
-        "tp1": tp1,
-        "tp2": tp2,
-        "tp3": tp3,
-        "sl_pct": round(sl_pct, 2),
-        "tp1_pct": round(tp1_pct, 2),
-        "tp2_pct": round(tp2_pct, 2),
-        "rr_ratio": rr_ratio,
-        "qty": qty,
-        "modal": modal_usdt,
-        "profit_tp1": profit_tp1,
-        "profit_tp2": profit_tp2,
-        "loss_sl": loss_sl,
-        "atr": round(atr, 4),
-    }
 def build_chart(df, symbol, resistances=[], supports=[]):
     fig = make_subplots(
         rows=3, cols=1,
@@ -559,6 +474,9 @@ if "candles" not in st.session_state:
 if "auto_refresh" not in st.session_state:
     st.session_state["auto_refresh"] = False
 
+# api_key = "gXdeG9XPTBWlgG61uQxgMPojWqFTiQo9pCBQlvIqt1cKDVC9WlTlxlc1D1sJHHLt"
+# api_secret = "SWpV7Y77IhF0Da4plubMVOMILnpWY9Qd2AOLi2D1Qp4oBe3tuguXUkjPdQ527UkS"
+
 api_key = "gXdeG9XPTBWlgG61uQxgMPojWqFTiQo9pCBQlvIqt1cKDVC9WlTlxlc1D1sJHHLt"
 api_secret = "SWpV7Y77IhF0Da4plubMVOMILnpWY9Qd2AOLi2D1Qp4oBe3tuguXUkjPdQ527UkS"
 
@@ -618,26 +536,12 @@ with tab1:
         </div>
         """, unsafe_allow_html=True)
     with col_h2:
-        last_update = datetime.now().strftime('%H:%M:%S')
-        if st.session_state.get("auto_refresh"):
-            if "refresh_time" not in st.session_state:
-                st.session_state["refresh_time"] = time.time()
-            elapsed = int(time.time() - st.session_state.get("refresh_time", time.time()))
-            countdown = 30 - (elapsed % 30)
-            st.markdown(f"""
-            <div style="text-align:right; padding-top:12px; color:#8b949e; font-size:12px;">
-                Last update<br>
-                <span style="color:#e6edf3;">{last_update}</span><br>
-                <span style="color:#f0883e; font-size:11px;">🔄 Refresh in {countdown}s</span>
-            </div>
-            """, unsafe_allow_html=True)
-        else:
-            st.markdown(f"""
-            <div style="text-align:right; padding-top:12px; color:#8b949e; font-size:12px;">
-                Last update<br>
-                <span style="color:#e6edf3;">{last_update}</span>
-            </div>
-            """, unsafe_allow_html=True)
+        st.markdown(f"""
+        <div style="text-align:right; padding-top:12px; color:#8b949e; font-size:12px;">
+            Last update<br>
+            <span style="color:#e6edf3;">{datetime.now().strftime('%H:%M:%S')}</span>
+        </div>
+        """, unsafe_allow_html=True)
 
     st.markdown("---")
 
@@ -725,112 +629,6 @@ with tab1:
             st.markdown(f'<div style="text-align:center; padding:4px; color:#e6edf3; font-size:12px; font-weight:700;">── Now: ${price:,.4f} ──</div>', unsafe_allow_html=True)
             for s in supports:
                 st.markdown(f'<div class="sr-level sr-support"><span style="color:#8b949e;">Support</span><span style="color:#3fb950; font-weight:700;">${s:,.4f}</span></div>', unsafe_allow_html=True)
-
-    # Trading Plan section — full width below chart+signal
-    st.markdown("---")
-    st.markdown('<p class="section-header">📋 Trading Plan</p>', unsafe_allow_html=True)
-
-    modal = st.number_input("💵 Modal (USDT)", min_value=1.0, value=100.0, step=10.0, format="%.2f")
-
-    if df is not None and price_data is not None:
-        plan = generate_trading_plan(df, price_data, signal, supports, resistances, modal_usdt=modal)
-
-        if plan:
-            rr_color = "#3fb950" if plan["rr_ratio"] >= 1.5 else "#f0883e" if plan["rr_ratio"] >= 1 else "#f85149"
-            action_color = "#3fb950" if plan["signal"] == "BUY" else "#f85149"
-            action_emoji = "🟢" if plan["signal"] == "BUY" else "🔴"
-
-            col_p1, col_p2, col_p3 = st.columns(3)
-
-            with col_p1:
-                st.markdown(f"""
-                <div class="tp-card">
-                    <p style="color:#8b949e; font-size:11px; text-transform:uppercase; letter-spacing:1px; margin:0 0 12px 0;">Entry & Exit</p>
-                    <div class="tp-row">
-                        <span class="tp-label">Action</span>
-                        <span class="tp-value" style="color:{action_color};">{action_emoji} {plan["signal"]}</span>
-                    </div>
-                    <div class="tp-row">
-                        <span class="tp-label">Entry Price</span>
-                        <span class="tp-value tp-yellow">${plan["entry"]:,.4f}</span>
-                    </div>
-                    <div class="tp-row">
-                        <span class="tp-label">Stop Loss</span>
-                        <span class="tp-value tp-red">${plan["sl"]:,.4f} (-{plan["sl_pct"]}%)</span>
-                    </div>
-                    <div class="tp-row">
-                        <span class="tp-label">TP 1</span>
-                        <span class="tp-value tp-green">${plan["tp1"]:,.4f} (+{plan["tp1_pct"]}%)</span>
-                    </div>
-                    <div class="tp-row">
-                        <span class="tp-label">TP 2</span>
-                        <span class="tp-value tp-green">${plan["tp2"]:,.4f} (+{plan["tp2_pct"]}%)</span>
-                    </div>
-                </div>
-                """, unsafe_allow_html=True)
-
-            with col_p2:
-                st.markdown(f"""
-                <div class="tp-card">
-                    <p style="color:#8b949e; font-size:11px; text-transform:uppercase; letter-spacing:1px; margin:0 0 12px 0;">Risk & Reward</p>
-                    <div class="tp-row">
-                        <span class="tp-label">R/R Ratio</span>
-                        <span class="tp-value" style="color:{rr_color};">1 : {plan["rr_ratio"]}</span>
-                    </div>
-                    <div class="tp-row">
-                        <span class="tp-label">ATR</span>
-                        <span class="tp-value">${plan["atr"]:,.4f}</span>
-                    </div>
-                    <div class="tp-row">
-                        <span class="tp-label">Modal</span>
-                        <span class="tp-value">${plan["modal"]:,.2f} USDT</span>
-                    </div>
-                    <div class="tp-row">
-                        <span class="tp-label">Qty</span>
-                        <span class="tp-value">{plan["qty"]} {symbol.replace("USDT","")}</span>
-                    </div>
-                </div>
-                """, unsafe_allow_html=True)
-
-            with col_p3:
-                st.markdown(f"""
-                <div class="tp-card">
-                    <p style="color:#8b949e; font-size:11px; text-transform:uppercase; letter-spacing:1px; margin:0 0 12px 0;">Estimasi P&L</p>
-                    <div class="tp-row">
-                        <span class="tp-label">Profit TP1</span>
-                        <span class="tp-value tp-green">+${plan["profit_tp1"]}</span>
-                    </div>
-                    <div class="tp-row">
-                        <span class="tp-label">Profit TP2</span>
-                        <span class="tp-value tp-green">+${plan["profit_tp2"]}</span>
-                    </div>
-                    <div class="tp-row">
-                        <span class="tp-label">Max Loss</span>
-                        <span class="tp-value tp-red">-${plan["loss_sl"]}</span>
-                    </div>
-                    <div class="tp-row">
-                        <span class="tp-label">Worth it?</span>
-                        <span class="tp-value" style="color:{rr_color};">{"✅ YES" if plan["rr_ratio"] >= 1.5 else "⚠️ MARGINAL" if plan["rr_ratio"] >= 1 else "❌ NO"}</span>
-                    </div>
-                </div>
-                """, unsafe_allow_html=True)
-
-            st.markdown(f"""
-            <div style="background:#161b22; border:1px solid #30363d; border-radius:8px; padding:12px; margin-top:8px;">
-                <p style="color:#8b949e; font-size:12px; margin:0;">
-                💡 <strong style="color:#e6edf3;">Cara pakai:</strong>
-                Entry di <strong style="color:#f0883e;">${plan["entry"]:,.4f}</strong> →
-                Pasang SL di <strong style="color:#f85149;">${plan["sl"]:,.4f}</strong> →
-                Take profit sebagian di TP1 <strong style="color:#3fb950;">${plan["tp1"]:,.4f}</strong>,
-                sisanya di TP2 <strong style="color:#3fb950;">${plan["tp2"]:,.4f}</strong>.
-                R/R ratio <strong style="color:{rr_color};">1:{plan["rr_ratio"]}</strong>
-                {"— trade ini worth it! ✅" if plan["rr_ratio"] >= 1.5 else "— pertimbangkan ulang ⚠️" if plan["rr_ratio"] >= 1 else "— skip trade ini ❌"}
-                </p>
-            </div>
-            """, unsafe_allow_html=True)
-
-        else:
-            st.info("⏳ Sinyal HOLD — Trading plan tidak tersedia. Tunggu sinyal BUY/SELL yang lebih jelas.")
 
 # ─── TAB 2: MULTI TIMEFRAME ───
 with tab2:
@@ -956,8 +754,5 @@ with tab4:
 #  AUTO REFRESH
 # ─────────────────────────────────────────────
 if st.session_state.get("auto_refresh"):
-    if "refresh_time" not in st.session_state:
-        st.session_state["refresh_time"] = time.time()
     time.sleep(30)
-    st.session_state["refresh_time"] = time.time()
     st.rerun()
