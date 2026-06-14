@@ -622,8 +622,8 @@ with tab1:
         if st.session_state.get("auto_refresh"):
             if "refresh_time" not in st.session_state:
                 st.session_state["refresh_time"] = time.time()
-            elapsed = int(time.time() - st.session_state["refresh_time"])
-            countdown = max(0, 30 - elapsed)
+            elapsed = int(time.time() - st.session_state.get("refresh_time", time.time()))
+            countdown = 30 - (elapsed % 30)
             st.markdown(f"""
             <div style="text-align:right; padding-top:12px; color:#8b949e; font-size:12px;">
                 Last update<br>
@@ -956,6 +956,8 @@ with tab4:
 #  AUTO REFRESH
 # ─────────────────────────────────────────────
 if st.session_state.get("auto_refresh"):
-    st.session_state["refresh_time"] = time.time()
+    if "refresh_time" not in st.session_state:
+        st.session_state["refresh_time"] = time.time()
     time.sleep(30)
+    st.session_state["refresh_time"] = time.time()
     st.rerun()
