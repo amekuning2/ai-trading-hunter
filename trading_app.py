@@ -618,12 +618,26 @@ with tab1:
         </div>
         """, unsafe_allow_html=True)
     with col_h2:
-        st.markdown(f"""
-        <div style="text-align:right; padding-top:12px; color:#8b949e; font-size:12px;">
-            Last update<br>
-            <span style="color:#e6edf3;">{datetime.now().strftime('%H:%M:%S')}</span>
-        </div>
-        """, unsafe_allow_html=True)
+        last_update = datetime.now().strftime('%H:%M:%S')
+        if st.session_state.get("auto_refresh"):
+            if "refresh_time" not in st.session_state:
+                st.session_state["refresh_time"] = time.time()
+            elapsed = int(time.time() - st.session_state["refresh_time"])
+            countdown = max(0, 30 - elapsed)
+            st.markdown(f"""
+            <div style="text-align:right; padding-top:12px; color:#8b949e; font-size:12px;">
+                Last update<br>
+                <span style="color:#e6edf3;">{last_update}</span><br>
+                <span style="color:#f0883e; font-size:11px;">🔄 Refresh in {countdown}s</span>
+            </div>
+            """, unsafe_allow_html=True)
+        else:
+            st.markdown(f"""
+            <div style="text-align:right; padding-top:12px; color:#8b949e; font-size:12px;">
+                Last update<br>
+                <span style="color:#e6edf3;">{last_update}</span>
+            </div>
+            """, unsafe_allow_html=True)
 
     st.markdown("---")
 
@@ -942,5 +956,6 @@ with tab4:
 #  AUTO REFRESH
 # ─────────────────────────────────────────────
 if st.session_state.get("auto_refresh"):
+    st.session_state["refresh_time"] = time.time()
     time.sleep(30)
     st.rerun()
