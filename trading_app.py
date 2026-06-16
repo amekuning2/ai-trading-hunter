@@ -2,12 +2,10 @@ import streamlit as st
 import pandas as pd
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
-from binance.client import Client
-from binance.exceptions import BinanceAPIException
+import requests
 import ta
 import time
 from datetime import datetime
-import os
 
 # ─────────────────────────────────────────────
 #  CONFIG
@@ -172,38 +170,19 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 # ─────────────────────────────────────────────
-#  LOAD API CREDENTIALS FROM ENVIRONMENT
+#  BINANCE PUBLIC REST API (no API key needed for market data)
 # ─────────────────────────────────────────────
-try:
-    api_key = st.secrets["BINANCE_API_KEY"]
-    api_secret = st.secrets["BINANCE_API_SECRET"]
-except Exception:
-    st.error("❌ Binance API credentials not found!")
-    st.info("""
-    Tambahkan secrets di Streamlit Cloud:
-    **App Settings → Secrets**, isi dengan:
-    ```
-    BINANCE_API_KEY = "your_key_here"
-    BINANCE_API_SECRET = "your_secret_here"
-    ```
-    """)
-    st.stop()
-
-# ─────────────────────────────────────────────
-#  BINANCE CLIENT
-# ─────────────────────────────────────────────
-@st.cache_resource
-def get_client(api_key, api_secret):
-    return Client(api_key, api_secret)
+BINANCE_API = "https://api.binance.com/api/v3"
 
 # ─────────────────────────────────────────────
 #  DATA FUNCTIONS
 # ─────────────────────────────────────────────
 @st.cache_data(ttl=30)
-def get_price(symbol, api_key, api_secret):
+def get_price(symbol, _unused1=None, _unused2=None):
     try:
-        client = get_client(api_key, api_secret)
-        ticker = client.get_ticker(symbol=symbol)
+        r = requests.get(f"{BINANCE_API}/ticker/24hr", params={"symbol": symbol}, timeout=10)
+        r.raise_for_status()
+        ticker = r.json()
         return {
             "price": float(ticker["lastPrice"]),
             "change": float(ticker["priceChangePercent"]),
@@ -212,14 +191,15 @@ def get_price(symbol, api_key, api_secret):
             "volume": float(ticker["volume"]),
             "quoteVolume": float(ticker["quoteVolume"]),
         }
-    except Exception as e:
+    except Exception:
         return None
 
 @st.cache_data(ttl=60)
-def get_klines(symbol, interval, limit, api_key, api_secret):
+def get_klines(symbol, interval, limit, _unused1=None, _unused2=None):
     try:
-        client = get_client(api_key, api_secret)
-        klines = client.get_klines(symbol=symbol, interval=interval, limit=limit)
+        r = requests.get(f"{BINANCE_API}/klines", params={"symbol": symbol, "interval": interval, "limit": limit}, timeout=10)
+        r.raise_for_status()
+        klines = r.json()
         df = pd.DataFrame(klines, columns=[
             "timestamp","open","high","low","close","volume",
             "close_time","quote_volume","trades","taker_buy_base",
@@ -229,19 +209,21 @@ def get_klines(symbol, interval, limit, api_key, api_secret):
         for col in ["open","high","low","close","volume"]:
             df[col] = df[col].astype(float)
         return df
-    except Exception as e:
+    except Exception:
         return None
 
 @st.cache_data(ttl=60)
-def get_top_gainers(api_key, api_secret, n=10):
+def get_top_gainers(_unused1=None, _unused2=None, n=10):
     try:
-        client = get_client(api_key, api_secret)
-        tickers = client.get_ticker()
+        r = requests.get(f"{BINANCE_API}/ticker/24hr", timeout=10)
+        r.raise_for_status()
+        tickers = r.json()
         usdt_pairs = [t for t in tickers if t["symbol"].endswith("USDT") and float(t["quoteVolume"]) > 1_000_000]
         sorted_gainers = sorted(usdt_pairs, key=lambda x: float(x["priceChangePercent"]), reverse=True)
         return sorted_gainers[:n]
     except:
         return []
+
 
 # ─────────────────────────────────────────────
 #  AI SIGNAL ENGINE
@@ -398,11 +380,11 @@ def calculate_signal(df):
 # ─────────────────────────────────────────────
 #  MULTI TIMEFRAME ANALYSIS
 # ─────────────────��───────────────────────────
-def multi_timeframe_analysis(symbol, api_key, api_secret):
+def multi_timeframe_analysis(symbol):
     timeframes = [("1H", "1h", 100), ("4H", "4h", 100), ("1D", "1d", 200)]
     results = []
     for label, interval, limit in timeframes:
-        df = get_klines(symbol, interval, limit, api_key, api_secret)
+        df = get_klines(symbol, interval, limit)
         signal, reason, _, _, strength = calculate_signal(df)
         results.append((label, signal, reason, strength))
     return results
@@ -607,10 +589,10 @@ with tab1:
     with col_candle:
         candles = st.slider("Candles", 50, 500, 200)
 
-    price_data = get_price(symbol, api_key, api_secret)
+    price_data = get_price(symbol)
 
     if price_data is None:
-        st.error(f"Gagal ambil data {symbol}. Cek API key atau nama pair.")
+        st.error(f"Gagal ambil data {symbol}. Cek nama pair atau koneksi internet.")
         st.stop()
 
     price = price_data["price"]
@@ -662,7 +644,7 @@ with tab1:
 
     with col_chart:
         st.markdown('<p class="section-header">Price Chart</p>', unsafe_allow_html=True)
-        df = get_klines(symbol, interval_val, candles, api_key, api_secret)
+        df = get_klines(symbol, interval_val, candles)
         resistances, supports = get_support_resistance(df)
         if df is not None:
             fig = build_chart(df, symbol, resistances, supports)
@@ -839,7 +821,7 @@ with tab2:
     st.markdown(f"<p style='color:#8b949e; font-size:13px;'>Analisis {symbol} dari 3 timeframe sekaligus</p>", unsafe_allow_html=True)
 
     with st.spinner("Menganalisis semua timeframe..."):
-        mtf_results = multi_timeframe_analysis(symbol, api_key, api_secret)
+        mtf_results = multi_timeframe_analysis(symbol)
 
     buy_count = sum(1 for _, s, _, _ in mtf_results if s == "BUY")
     sell_count = sum(1 for _, s, _, _ in mtf_results if s == "SELL")
@@ -896,7 +878,7 @@ with tab2:
 with tab3:
     st.markdown('<p class="section-header">🔥 Top 10 Gainers Today</p>', unsafe_allow_html=True)
 
-    gainers = get_top_gainers(api_key, api_secret, n=10)
+    gainers = get_top_gainers(n=10)
 
     if gainers:
         col_g1, col_g2 = st.columns(2)
