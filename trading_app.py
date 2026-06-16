@@ -7,13 +7,6 @@ from binance.exceptions import BinanceAPIException
 import ta
 import time
 from datetime import datetime
-import os
-from dotenv import load_dotenv
-
-# ─────────────────────────────────────────────
-#  LOAD ENVIRONMENT VARIABLES
-# ─────────────────────────────────────────────
-load_dotenv()
 
 # ─────────────────────────────────────────────
 #  CONFIG
