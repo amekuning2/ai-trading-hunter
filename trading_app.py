@@ -8,12 +8,6 @@ import ta
 import time
 from datetime import datetime
 import os
-from dotenv import load_dotenv
-
-# ─────────────────────────────────────────────
-#  LOAD ENVIRONMENT VARIABLES
-# ─────────────────────────────────────────────
-load_dotenv()
 
 # ─────────────────────────────────────────────
 #  CONFIG
@@ -180,17 +174,17 @@ st.markdown("""
 # ─────────────────────────────────────────────
 #  LOAD API CREDENTIALS FROM ENVIRONMENT
 # ─────────────────────────────────────────────
-api_key = os.getenv("BINANCE_API_KEY")
-api_secret = os.getenv("BINANCE_API_SECRET")
-
-# Validate credentials
-if not api_key or not api_secret:
+try:
+    api_key = st.secrets["BINANCE_API_KEY"]
+    api_secret = st.secrets["BINANCE_API_SECRET"]
+except Exception:
     st.error("❌ Binance API credentials not found!")
     st.info("""
-    Please setup your `.env` file with:
+    Tambahkan secrets di Streamlit Cloud:
+    **App Settings → Secrets**, isi dengan:
     ```
-    BINANCE_API_KEY=your_key_here
-    BINANCE_API_SECRET=your_secret_here
+    BINANCE_API_KEY = "your_key_here"
+    BINANCE_API_SECRET = "your_secret_here"
     ```
     """)
     st.stop()
