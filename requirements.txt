@@ -4,3 +4,5 @@ requests
 ta
 python-binance
 plotly
+python-dotenv
+MetaTrader5
