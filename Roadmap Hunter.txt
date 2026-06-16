@@ -21,7 +21,7 @@ Week 3 - MT5 PAGE
 ⏳ Realtime forex chart
 ⏳ AI Signal forex
 
-Week 4 - AUTO TRADE
+Week 4 - TRADE
 ⏳ Upgrade AI signal lebih akurat
 ⏳ Price alert / notifikasi
 ⏳ Portfolio tracker

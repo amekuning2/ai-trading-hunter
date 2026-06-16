@@ -207,6 +207,7 @@ def get_price(symbol, BINANCE_API_KEY, BINANCE_API_SECRET):
     try:
         client = get_client(BINANCE_API_KEY, BINANCE_API_SECRET)
         ticker = client.get_ticker(symbol=symbol)
+
         return {
             "price": float(ticker["lastPrice"]),
             "change": float(ticker["priceChangePercent"]),
@@ -215,8 +216,11 @@ def get_price(symbol, BINANCE_API_KEY, BINANCE_API_SECRET):
             "volume": float(ticker["volume"]),
             "quoteVolume": float(ticker["quoteVolume"]),
         }
+    
     except Exception as e:
-        return None
+        st.error(f"BINANCE ERROR: {type(e).__name__}")
+        st.error(str(e))
+        raise
 
 @st.cache_data(ttl=60)
 def get_klines(symbol, interval, limit, BINANCE_API_KEY, BINANCE_API_SECRET):
@@ -948,7 +952,7 @@ with tab4:
     st.markdown(f"""
     <div style="background:#161b22; border:1px solid #30363d; border-radius:8px; padding:16px;">
         <p style="color:#8b949e; font-size:12px; margin:0;">
-        Version: <span style="color:#e6edf3;">v2.1 (Secure)</span><br>
+        Version: <span style="color:#e6edf3;">v2.2 (Secure)</span><br>
         Exchange: <span style="color:#e6edf3;">Binance Spot</span><br>
         Features: <span style="color:#e6edf3;">Multi-TF · S&R · Stochastic · EMA200</span><br>
         Status: <span style="color:#3fb950;">🟢 Running (Secure Mode)</span>
