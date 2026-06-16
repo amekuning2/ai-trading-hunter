@@ -1,24 +1,27 @@
-V0.8
-✅ Indicator Scanner
+Week 1 - BINANCE PAGE
+✅ Realtime price + chart
+✅ AI Signal (BUY/SELL/HOLD)
+✅ Top Gainers
+✅ Deploy VPS 24/7
+✅ Akses semua device
 
-↓
+Week 2 - AI SIGNAL ENHANCEMENT
+✅ Signal Strength
+✅ Multi-Timeframe
+✅ Support & Resistance  
+✅ Stochastic + EMA200
+✅ Trading Plan (Entry/TP/SL/RR)
+✅ No sidebar — mobile friendly
+✅ Stop loss / take profit
 
-V1.0
-🎯 Opportunity Hunter
+Week 3 - MT5 PAGE
+⏳ Install MT5 di VPS
+⏳ Connect Python bridge
+⏳ Realtime forex chart
+⏳ AI Signal forex
 
-↓
-
-V1.5
-🎯 Trade Planner
-
-↓
-
-V2.0
-🎯 Paper Trading
-
-↓
-
-V3.0
-🎯 Capital Growth Validation
-
----
+Week 4 - AUTO TRADE
+⏳ Upgrade AI signal lebih akurat
+⏳ Price alert / notifikasi
+⏳ Crypto news feed
+⏳ Portfolio tracker
