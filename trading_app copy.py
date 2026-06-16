@@ -207,7 +207,6 @@ def get_price(symbol, BINANCE_API_KEY, BINANCE_API_SECRET):
     try:
         client = get_client(BINANCE_API_KEY, BINANCE_API_SECRET)
         ticker = client.get_ticker(symbol=symbol)
-
         return {
             "price": float(ticker["lastPrice"]),
             "change": float(ticker["priceChangePercent"]),
@@ -216,11 +215,8 @@ def get_price(symbol, BINANCE_API_KEY, BINANCE_API_SECRET):
             "volume": float(ticker["volume"]),
             "quoteVolume": float(ticker["quoteVolume"]),
         }
-    
     except Exception as e:
-        st.error(f"BINANCE ERROR: {type(e).__name__}")
-        st.error(str(e))
-        raise
+        return None
 
 @st.cache_data(ttl=60)
 def get_klines(symbol, interval, limit, BINANCE_API_KEY, BINANCE_API_SECRET):
