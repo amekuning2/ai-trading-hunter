@@ -173,8 +173,12 @@ st.markdown("""
 # ─────────────────────────────────────────────
 #  LOAD API CREDENTIALS FROM ENVIRONMENT
 # ─────────────────────────────────────────────
-BINANCE_API_KEY = st.secrets("BINANCE_API_KEY")
-BINANCE_API_SECRET = st.secrets("BINANCE_API_SECRET")
+try:
+    BINANCE_API_KEY = st.secrets["BINANCE_API_KEY"]
+    BINANCE_API_SECRET = st.secrets["BINANCE_API_SECRET"]
+except Exception as e:
+    st.error(f"Secrets error: {e}")
+    st.stop()
 
 # Validate credentials
 if not BINANCE_API_KEY or not BINANCE_API_SECRET:

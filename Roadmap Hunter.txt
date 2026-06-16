@@ -24,5 +24,4 @@ Week 3 - MT5 PAGE
 Week 4 - AUTO TRADE
 ⏳ Upgrade AI signal lebih akurat
 ⏳ Price alert / notifikasi
-⏳ Crypto news feed
 ⏳ Portfolio tracker
