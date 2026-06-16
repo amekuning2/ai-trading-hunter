@@ -15,7 +15,8 @@ Week 2 - AI SIGNAL ENHANCEMENT
 ✅ Stop loss / take profit
 
 Week 3 - MT5 PAGE
-⏳ Install MT5 di VPS
+✅ Install MT5 di VPS
+✅ create firewall rule di GCP: 8502
 ⏳ Connect Python bridge
 ⏳ Realtime forex chart
 ⏳ AI Signal forex
