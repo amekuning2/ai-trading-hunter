@@ -8,6 +8,12 @@ import ta
 import time
 from datetime import datetime
 import os
+from dotenv import load_dotenv
+
+# ─────────────────────────────────────────────
+#  LOAD ENVIRONMENT VARIABLES
+# ─────────────────────────────────────────────
+load_dotenv()
 
 # ─────────────────────────────────────────────
 #  CONFIG
@@ -170,6 +176,24 @@ st.markdown("""
     .tp-yellow { color: #f0883e !important; }
 </style>
 """, unsafe_allow_html=True)
+
+# ─────────────────────────────────────────────
+#  LOAD API CREDENTIALS FROM ENVIRONMENT
+# ─────────────────────────────────────────────
+api_key = os.getenv("BINANCE_API_KEY")
+api_secret = os.getenv("BINANCE_API_SECRET")
+
+# Validate credentials
+if not api_key or not api_secret:
+    st.error("❌ Binance API credentials not found!")
+    st.info("""
+    Please setup your `.env` file with:
+    ```
+    BINANCE_API_KEY=your_key_here
+    BINANCE_API_SECRET=your_secret_here
+    ```
+    """)
+    st.stop()
 
 # ─────────────────────────────────────────────
 #  BINANCE CLIENT
@@ -379,7 +403,7 @@ def calculate_signal(df):
 
 # ─────────────────────────────────────────────
 #  MULTI TIMEFRAME ANALYSIS
-# ─────────────────────────────────────────────
+# ─────────────────��───────────────────────────
 def multi_timeframe_analysis(symbol, api_key, api_secret):
     timeframes = [("1H", "1h", 100), ("4H", "4h", 100), ("1D", "1d", 200)]
     results = []
@@ -558,9 +582,6 @@ if "candles" not in st.session_state:
     st.session_state["candles"] = 200
 if "auto_refresh" not in st.session_state:
     st.session_state["auto_refresh"] = False
-
-api_key = "gXdeG9XPTBWlgG61uQxgMPojWqFTiQo9pCBQlvIqt1cKDVC9WlTlxlc1D1sJHHLt"
-api_secret = "SWpV7Y77IhF0Da4plubMVOMILnpWY9Qd2AOLi2D1Qp4oBe3tuguXUkjPdQ527UkS"
 
 # ─────────────────────────────────────────────
 #  MAIN CONTENT
@@ -930,10 +951,10 @@ with tab4:
     st.markdown(f"""
     <div style="background:#161b22; border:1px solid #30363d; border-radius:8px; padding:16px;">
         <p style="color:#8b949e; font-size:12px; margin:0;">
-        Version: <span style="color:#e6edf3;">v2.1</span><br>
+        Version: <span style="color:#e6edf3;">v2.1 (Secure)</span><br>
         Exchange: <span style="color:#e6edf3;">Binance Spot</span><br>
         Features: <span style="color:#e6edf3;">Multi-TF · S&R · Stochastic · EMA200</span><br>
-        Status: <span style="color:#3fb950;">🟢 Running</span>
+        Status: <span style="color:#3fb950;">🟢 Running (Secure Mode)</span>
         </p>
     </div>
     """, unsafe_allow_html=True)
