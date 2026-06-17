@@ -1,0 +1,413 @@
+===========================================================
+AI TRADING HUNTER
+BETA ROADMAP
+Version 2.3 → 3.0
+===========================================================
+
+MISSION
+
+Transform AI Trading Hunter from a dashboard platform into
+a quantitative trading intelligence system capable of
+producing validated BUY/SELL signals with confidence scores,
+TP/SL recommendations, and backtested performance metrics.
+
+-----------------------------------------------------------
+CURRENT STATUS (CHECKPOINT)
+-----------------------------------------------------------
+
+ALPHA PHASE COMPLETE
+
+Infrastructure:
+✓ GCP Server
+✓ Windows Server
+✓ RDP Access
+✓ GitHub Repository
+✓ Binance Integration
+✓ MT5 Integration
+✓ Streamlit Dashboards
+✓ Public Access
+✓ Auto Startup via Task Scheduler
+
+Checkpoint Release:
+v2.2 Secure
+
+Next Development Branch:
+v2.3 Beta
+
+===========================================================
+PHASE BETA-1
+ARCHITECTURE REFACTOR
+===========================================================
+
+OBJECTIVE
+
+Unify Binance and MT5 into a single application architecture.
+
+TARGET STRUCTURE
+
+app.py
+
+pages/
+├── Binance.py
+├── MT5.py
+├── Signals.py
+├── Backtest.py
+└── Settings.py
+
+services/
+├── binance_service.py
+├── mt5_service.py
+├── signal_service.py
+└── risk_service.py
+
+DELIVERABLES
+
+✓ Single Dashboard
+✓ Single Port (8501)
+✓ Multi-Page Navigation
+✓ Modular Codebase
+✓ Easier Maintenance
+
+STATUS
+
+High Priority
+
+===========================================================
+PHASE BETA-2
+MARKET DATA ENGINE
+===========================================================
+
+OBJECTIVE
+
+Create a standardized market data layer.
+
+BINANCE DATA
+
+✓ OHLCV
+✓ Volume
+✓ Funding Rate
+✓ Open Interest
+✓ Liquidation Data
+
+MT5 DATA
+
+✓ OHLC
+✓ Tick Volume
+✓ Spread
+✓ Session Information
+✓ Market Structure
+
+CORE FUNCTIONS
+
+get_market_data()
+
+get_multi_timeframe_data()
+
+get_volume_data()
+
+get_structure_data()
+
+DELIVERABLES
+
+✓ Unified Data Format
+✓ Multi-Timeframe Support
+✓ Consistent Data Pipeline
+
+===========================================================
+PHASE BETA-3
+SIGNAL ENGINE V1
+===========================================================
+
+OBJECTIVE
+
+Build the first scoring-based signal system.
+
+TREND SCORE (25%)
+
+Components:
+- EMA Trend
+- Market Bias
+- Higher High
+- Higher Low
+
+MOMENTUM SCORE (20%)
+
+Components:
+- RSI
+- MACD
+- ROC
+- ADX
+
+STRUCTURE SCORE (20%)
+
+Components:
+- Break of Structure
+- Change of Character
+- Support & Resistance
+
+VOLUME SCORE (15%)
+
+Components:
+- Volume Spike
+- Relative Volume
+- Volume Confirmation
+
+LIQUIDITY SCORE (10%)
+
+Components:
+- Equal High
+- Equal Low
+- Liquidity Grab
+- Liquidity Sweep
+
+VOLATILITY SCORE (10%)
+
+Components:
+- ATR
+- Compression
+- Expansion
+
+FINAL OUTPUT EXAMPLE
+
+BUY XAUUSD
+
+Confidence: 87%
+
+Trend:      22/25
+Momentum:   17/20
+Structure:  18/20
+Volume:     13/15
+Liquidity:   8/10
+Volatility:  9/10
+
+===========================================================
+PHASE BETA-4
+TP / SL ENGINE
+===========================================================
+
+OBJECTIVE
+
+Generate intelligent trade management levels.
+
+INPUTS
+
+✓ ATR
+✓ Market Structure
+✓ Liquidity Zones
+✓ Volatility
+
+OUTPUTS
+
+✓ Entry
+✓ Stop Loss
+✓ TP1
+✓ TP2
+✓ TP3
+✓ Risk Reward Ratio
+
+OUTPUT EXAMPLE
+
+BUY XAUUSD
+
+Entry : 3380
+SL    : 3368
+TP1   : 3392
+TP2   : 3404
+TP3   : 3416
+
+RR    : 1:3
+
+===========================================================
+PHASE BETA-5
+BACKTESTING ENGINE V1
+===========================================================
+
+OBJECTIVE
+
+Validate signal quality using historical data.
+
+SUPPORTED ASSETS
+
+Crypto:
+- BTCUSDT
+- ETHUSDT
+- BNBUSDT
+
+Forex:
+- EURUSD
+- GBPUSD
+- USDJPY
+
+Commodities:
+- XAUUSD
+
+METRICS
+
+✓ Total Trades
+✓ Win Rate
+✓ Average RR
+✓ Profit Factor
+✓ Expectancy
+✓ Max Drawdown
+
+DELIVERABLES
+
+✓ Backtest Dashboard
+✓ CSV Export
+✓ Performance Report
+
+===========================================================
+PHASE BETA-6
+SIGNAL DASHBOARD
+===========================================================
+
+OBJECTIVE
+
+Display real-time trade opportunities.
+
+SECTIONS
+
+BINANCE SIGNALS
+
+✓ Top Buy
+✓ Top Sell
+✓ Confidence Score
+✓ Risk Reward
+
+MT5 SIGNALS
+
+✓ Gold
+✓ Forex
+✓ Indices
+
+WATCHLIST
+
+✓ Strong Buy
+✓ Strong Sell
+✓ Neutral
+
+===========================================================
+PHASE BETA-7
+RISK MANAGEMENT ENGINE
+===========================================================
+
+OBJECTIVE
+
+Filter low-quality trades.
+
+FILTERS
+
+✓ Spread Filter
+✓ Volatility Filter
+✓ Session Filter
+✓ Liquidity Filter
+✓ News Filter
+
+OUTPUT
+
+✓ Trade Allowed
+✓ Trade Avoided
+
+===========================================================
+PHASE BETA-8
+PERFORMANCE ANALYTICS
+===========================================================
+
+OBJECTIVE
+
+Measure and improve system performance.
+
+ANALYTICS
+
+✓ Daily Performance
+✓ Weekly Performance
+✓ Monthly Performance
+✓ Asset Ranking
+✓ Best Setup
+✓ Worst Setup
+
+DELIVERABLES
+
+✓ Analytics Dashboard
+✓ Strategy Insights
+✓ Performance Tracking
+
+===========================================================
+PHASE BETA-9
+AI ENHANCEMENT LAYER
+===========================================================
+
+IMPORTANT
+
+AI is an enhancement layer.
+
+AI is NOT the core signal engine.
+
+CORE FUNCTIONS
+
+✓ Market Summary
+✓ Signal Explanation
+✓ Trade Journal Analysis
+✓ Strategy Suggestions
+✓ Performance Review
+
+NOT INCLUDED
+
+✗ AI generates BUY/SELL decisions directly
+
+Reason:
+Signals must remain transparent and backtestable.
+
+===========================================================
+PHASE BETA-10
+PRODUCTION RELEASE v3.0
+===========================================================
+
+OBJECTIVE
+
+Release Candidate for production usage.
+
+FINAL FEATURES
+
+✓ Unified Dashboard
+✓ Binance Analysis
+✓ MT5 Analysis
+✓ Signal Engine
+✓ TP/SL Engine
+✓ Risk Engine
+✓ Backtesting Engine
+✓ Analytics Engine
+✓ AI Assistant
+
+===========================================================
+SUCCESS CRITERIA
+===========================================================
+
+The Beta Roadmap is considered complete when:
+
+Win Rate      > 55%
+Profit Factor > 1.50
+Average RR    > 1.80
+Max Drawdown  < 15%
+
+All results must come from reproducible backtesting,
+not manual estimation.
+
+===========================================================
+VISION
+===========================================================
+
+FROM
+
+Dashboard Monitoring Platform
+
+TO
+
+Quantitative Trading Intelligence System
+
+Version:
+v2.3 Beta → v3.0 Production
+
+Project:
+AI Trading Hunter
+===========================================================
