@@ -456,7 +456,15 @@ def generate_trading_plan(df, price_data, signal, supports, resistances, modal_u
         if supports:
             sl = min(sl, round(supports[0] * 0.998, 4))
         if resistances:
-            tp1 = min(tp1, round(resistances[0] * 0.999, 4))
+            nearest_resistance = round(resistances[0] * 0.999, 4)
+            if nearest_resistance > entry:
+                tp1 = min(tp1, nearest_resistance)
+
+        # Safety validation
+        tp1 = max(tp1, round(entry * 1.001, 4))
+        tp2 = max(tp2, round(tp1 * 1.001, 4))
+        tp3 = max(tp3, round(tp2 * 1.001, 4))
+        sl = min(sl, round(entry * 0.995, 4))
 
     elif signal == "SELL":
         entry = round(current_price * 1.001, 4)
@@ -467,7 +475,15 @@ def generate_trading_plan(df, price_data, signal, supports, resistances, modal_u
         if resistances:
             sl = max(sl, round(resistances[0] * 1.002, 4))
         if supports:
-            tp1 = max(tp1, round(supports[0] * 1.001, 4))
+            nearest_support = round(supports[0] * 1.001, 4)
+            if nearest_support < entry:
+                tp1 = max(tp1, nearest_support)
+
+        # Safety validation
+        tp1 = min(tp1, round(entry * 0.999, 4))
+        tp2 = min(tp2, round(tp1 * 0.999, 4))
+        tp3 = min(tp3, round(tp2 * 0.999, 4))
+        sl = max(sl, round(entry * 1.005, 4))
     else:
         return None
 
