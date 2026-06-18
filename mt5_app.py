@@ -156,86 +156,273 @@ def get_all_prices(pairs):
     return result
 
 # ─────────────────────────────────────────────
-#  AI SIGNAL ENGINE
+#  AI SIGNAL ENGINE v2 — SCORING ENGINE
+#  Bobot: Trend=35, Momentum=25, Structure=20,
+#         MTF=15, Volume=5  → Total=100
 # ─────────────────────────────────────────────
-def calculate_signal(df):
+def calculate_signal(df, mtf_score_override=None):
+    """
+    Returns:
+        signal       : "BUY" | "SELL" | "HOLD"
+        reason       : string deskripsi
+        signals      : dict badge indikator (kompatibel UI lama)
+        indicators   : dict nilai mentah indikator
+        confidence   : int 0-100 (pengganti strength)
+        score_detail : dict breakdown per kategori
+    """
     if df is None or len(df) < 50:
-        return "HOLD", "Data tidak cukup", {}, {}, 0
+        empty_detail = {
+            "trend": 0, "trend_max": 35,
+            "momentum": 0, "momentum_max": 25,
+            "structure": 0, "structure_max": 20,
+            "mtf": 0, "mtf_max": 15,
+            "volume": 0, "volume_max": 5,
+            "total": 0, "bias": "HOLD"
+        }
+        return "HOLD", "Data tidak cukup", {}, {}, 0, empty_detail
 
-    close = df["close"]
-    high = df["high"]
-    low = df["low"]
-    volume = df["volume"]
-
-    rsi = ta.momentum.RSIIndicator(close, window=14).rsi().iloc[-1]
-    macd_ind = ta.trend.MACD(close)
-    macd = macd_ind.macd().iloc[-1]
-    macd_signal_val = macd_ind.macd_signal().iloc[-1]
-    macd_hist = macd_ind.macd_diff().iloc[-1]
-    bb = ta.volatility.BollingerBands(close, window=20)
-    bb_upper = bb.bollinger_hband().iloc[-1]
-    bb_lower = bb.bollinger_lband().iloc[-1]
+    close   = df["close"]
+    high    = df["high"]
+    low     = df["low"]
+    volume  = df["volume"]
     current_price = close.iloc[-1]
-    ema20 = ta.trend.EMAIndicator(close, window=20).ema_indicator().iloc[-1]
-    ema50 = ta.trend.EMAIndicator(close, window=50).ema_indicator().iloc[-1]
-    ema200 = ta.trend.EMAIndicator(close, window=200).ema_indicator().iloc[-1] if len(close) >= 200 else ema50
-    stoch = ta.momentum.StochasticOscillator(high, low, close)
-    stoch_k = stoch.stoch().iloc[-1]
-    stoch_d = stoch.stoch_signal().iloc[-1]
-    avg_vol = volume.rolling(20).mean().iloc[-1]
-    curr_vol = volume.iloc[-1]
-    vol_surge = curr_vol > avg_vol * 1.5
 
-    buy_score = 0
-    sell_score = 0
+    # ── Hitung semua indikator ──────────────────
+    ema20  = ta.trend.EMAIndicator(close, window=20).ema_indicator()
+    ema50  = ta.trend.EMAIndicator(close, window=50).ema_indicator()
+    ema200 = ta.trend.EMAIndicator(close, window=200).ema_indicator() if len(close) >= 200 else ema50
+
+    ema20_val  = ema20.iloc[-1]
+    ema50_val  = ema50.iloc[-1]
+    ema200_val = ema200.iloc[-1]
+
+    rsi        = ta.momentum.RSIIndicator(close, window=14).rsi().iloc[-1]
+    macd_ind   = ta.trend.MACD(close)
+    macd_val   = macd_ind.macd().iloc[-1]
+    macd_sig   = macd_ind.macd_signal().iloc[-1]
+    macd_hist  = macd_ind.macd_diff().iloc[-1]
+
+    stoch      = ta.momentum.StochasticOscillator(high, low, close)
+    stoch_k    = stoch.stoch().iloc[-1]
+    stoch_d    = stoch.stoch_signal().iloc[-1]
+
+    bb         = ta.volatility.BollingerBands(close, window=20)
+    bb_upper   = bb.bollinger_hband().iloc[-1]
+    bb_lower   = bb.bollinger_lband().iloc[-1]
+    bb_pos     = (current_price - bb_lower) / max(bb_upper - bb_lower, 0.0000001) * 100
+
+    avg_vol    = volume.rolling(20).mean().iloc[-1]
+    curr_vol   = volume.iloc[-1]
+    vol_ratio  = curr_vol / max(avg_vol, 0.0000001)
+
+    highs = high.rolling(10).max()
+    lows  = low.rolling(10).min()
+    nearest_resistance = highs.iloc[-1]
+    nearest_support    = lows.iloc[-1]
+    dist_to_resistance = (nearest_resistance - current_price) / max(current_price, 0.0000001) * 100
+    dist_to_support    = (current_price - nearest_support)    / max(current_price, 0.0000001) * 100
+
+    # ── 1. TREND SCORE (0-35) ──────────────────
+    trend_score = 0
+    trend_bias  = 0
+
+    if ema20_val > ema50_val > ema200_val:
+        trend_score += 20; trend_bias += 1
+    elif ema20_val < ema50_val < ema200_val:
+        trend_score += 0;  trend_bias -= 1
+    elif ema20_val > ema50_val:
+        trend_score += 12; trend_bias += 1
+    elif ema20_val < ema50_val:
+        trend_score += 5;  trend_bias -= 1
+    else:
+        trend_score += 8
+
+    if current_price > ema50_val:
+        trend_score += 10; trend_bias += 1
+    elif current_price < ema50_val:
+        trend_score += 0;  trend_bias -= 1
+    else:
+        trend_score += 5
+
+    if current_price > ema200_val:
+        trend_score += 5; trend_bias += 1
+    else:
+        trend_score += 0; trend_bias -= 1
+
+    trend_score = min(trend_score, 35)
+
+    # ── 2. MOMENTUM SCORE (0-25) ───────────────
+    momentum_score = 0
+    momentum_bias  = 0
+
+    if rsi < 30:
+        momentum_score += 10; momentum_bias += 1
+    elif rsi < 45:
+        momentum_score += 8;  momentum_bias += 1
+    elif rsi > 70:
+        momentum_score += 0;  momentum_bias -= 1
+    elif rsi > 55:
+        momentum_score += 3;  momentum_bias -= 1
+    else:
+        momentum_score += 5
+
+    if macd_val > macd_sig and macd_hist > 0:
+        momentum_score += 10; momentum_bias += 1
+    elif macd_val < macd_sig and macd_hist < 0:
+        momentum_score += 0;  momentum_bias -= 1
+    elif macd_val > macd_sig:
+        momentum_score += 6;  momentum_bias += 1
+    elif macd_val < macd_sig:
+        momentum_score += 3;  momentum_bias -= 1
+    else:
+        momentum_score += 5
+
+    if stoch_k < 20 and stoch_k > stoch_d:
+        momentum_score += 5;  momentum_bias += 1
+    elif stoch_k > 80 and stoch_k < stoch_d:
+        momentum_score += 0;  momentum_bias -= 1
+    elif stoch_k < 40:
+        momentum_score += 3;  momentum_bias += 1
+    elif stoch_k > 60:
+        momentum_score += 1;  momentum_bias -= 1
+    else:
+        momentum_score += 2
+
+    momentum_score = min(momentum_score, 25)
+
+    # ── 3. STRUCTURE SCORE (0-20) ──────────────
+    structure_score = 0
+    structure_bias  = 0
+
+    if bb_pos < 20:
+        structure_score += 10; structure_bias += 1
+    elif bb_pos > 80:
+        structure_score += 0;  structure_bias -= 1
+    elif bb_pos < 40:
+        structure_score += 7;  structure_bias += 1
+    elif bb_pos > 60:
+        structure_score += 3;  structure_bias -= 1
+    else:
+        structure_score += 5
+
+    if dist_to_support < dist_to_resistance:
+        structure_score += 8; structure_bias += 1
+    elif dist_to_resistance < dist_to_support:
+        structure_score += 2; structure_bias -= 1
+    else:
+        structure_score += 5
+
+    structure_score = min(structure_score, 20)
+
+    # ── 4. MTF SCORE (0-15) ────────────────────
+    if mtf_score_override is not None:
+        mtf_score = max(0, min(mtf_score_override, 15))
+    else:
+        ema20_series = ema20.dropna()
+        if len(ema20_series) >= 10:
+            slope_short = ema20_series.iloc[-1] - ema20_series.iloc[-5]
+            slope_long  = ema20_series.iloc[-1] - ema20_series.iloc[-10]
+            if slope_short > 0 and slope_long > 0:
+                mtf_score = 12
+            elif slope_short > 0 or slope_long > 0:
+                mtf_score = 8
+            elif slope_short < 0 and slope_long < 0:
+                mtf_score = 3
+            else:
+                mtf_score = 6
+        else:
+            mtf_score = 7
+
+    # ── 5. VOLUME SCORE (0-5) ──────────────────
+    if vol_ratio >= 2.0:
+        volume_score = 5
+    elif vol_ratio >= 1.5:
+        volume_score = 4
+    elif vol_ratio >= 1.0:
+        volume_score = 3
+    elif vol_ratio >= 0.7:
+        volume_score = 2
+    else:
+        volume_score = 1
+
+    # ── TOTAL ──────────────────────────────────
+    total_score = trend_score + momentum_score + structure_score + mtf_score + volume_score
+    weighted_bias = (trend_bias * 35) + (momentum_bias * 25) + (structure_bias * 20)
+    confidence = total_score
+
+    # ── SIGNAL DECISION ────────────────────────
+    if weighted_bias > 0 and total_score >= 60:
+        signal = "BUY"
+        reason = f"High probability BUY — Score {total_score}/100"
+    elif weighted_bias < 0 and total_score <= 45:
+        signal = "SELL"
+        reason = f"High probability SELL — Score {total_score}/100"
+    elif weighted_bias > 0 and total_score >= 50:
+        signal = "BUY"
+        reason = f"Moderate BUY setup — Score {total_score}/100"
+    elif weighted_bias < 0 and total_score <= 50:
+        signal = "SELL"
+        reason = f"Moderate SELL setup — Score {total_score}/100"
+    else:
+        signal = "HOLD"
+        reason = f"Market belum jelas — Score {total_score}/100, tunggu konfirmasi"
+
+    # ── BADGES (kompatibel UI lama) ─────────────
     signals = {}
 
-    if rsi < 30: buy_score += 2; signals["RSI"] = ("OVERSOLD", "green")
-    elif rsi < 45: buy_score += 1; signals["RSI"] = ("BULLISH", "green")
-    elif rsi > 70: sell_score += 2; signals["RSI"] = ("OVERBOUGHT", "red")
-    elif rsi > 55: sell_score += 1; signals["RSI"] = ("BEARISH", "red")
-    else: signals["RSI"] = ("NEUTRAL", "neutral")
+    if rsi < 30:   signals["RSI"] = ("OVERSOLD", "green")
+    elif rsi < 45: signals["RSI"] = ("BULLISH", "green")
+    elif rsi > 70: signals["RSI"] = ("OVERBOUGHT", "red")
+    elif rsi > 55: signals["RSI"] = ("BEARISH", "red")
+    else:          signals["RSI"] = ("NEUTRAL", "neutral")
 
-    if macd > macd_signal_val and macd_hist > 0: buy_score += 2; signals["MACD"] = ("BULLISH CROSS", "green")
-    elif macd < macd_signal_val and macd_hist < 0: sell_score += 2; signals["MACD"] = ("BEARISH CROSS", "red")
-    else: signals["MACD"] = ("NEUTRAL", "neutral")
+    if macd_val > macd_sig and macd_hist > 0:   signals["MACD"] = ("BULLISH CROSS", "green")
+    elif macd_val < macd_sig and macd_hist < 0: signals["MACD"] = ("BEARISH CROSS", "red")
+    else:                                        signals["MACD"] = ("NEUTRAL", "neutral")
 
-    if current_price < bb_lower: buy_score += 2; signals["BB"] = ("BELOW LOWER", "green")
-    elif current_price > bb_upper: sell_score += 2; signals["BB"] = ("ABOVE UPPER", "red")
-    else: signals["BB"] = ("WITHIN BAND", "neutral")
+    if ema20_val > ema50_val > ema200_val:   signals["EMA"] = ("STRONG UPTREND", "green")
+    elif ema20_val < ema50_val < ema200_val: signals["EMA"] = ("STRONG DOWNTREND", "red")
+    elif ema20_val > ema50_val:              signals["EMA"] = ("UPTREND", "green")
+    else:                                    signals["EMA"] = ("DOWNTREND", "red")
 
-    if ema20 > ema50 > ema200: buy_score += 2; signals["EMA"] = ("STRONG UPTREND", "green")
-    elif ema20 > ema50: buy_score += 1; signals["EMA"] = ("UPTREND", "green")
-    elif ema20 < ema50 < ema200: sell_score += 2; signals["EMA"] = ("STRONG DOWNTREND", "red")
-    else: sell_score += 1; signals["EMA"] = ("DOWNTREND", "red")
+    if stoch_k < 20 and stoch_k > stoch_d:   signals["STOCH"] = ("OVERSOLD CROSS", "green")
+    elif stoch_k > 80 and stoch_k < stoch_d: signals["STOCH"] = ("OVERBOUGHT CROSS", "red")
+    else:                                     signals["STOCH"] = ("NEUTRAL", "neutral")
 
-    if stoch_k < 20 and stoch_k > stoch_d: buy_score += 2; signals["STOCH"] = ("OVERSOLD CROSS", "green")
-    elif stoch_k > 80 and stoch_k < stoch_d: sell_score += 2; signals["STOCH"] = ("OVERBOUGHT CROSS", "red")
-    else: signals["STOCH"] = ("NEUTRAL", "neutral")
+    if bb_pos < 20:   signals["BB"] = ("BELOW LOWER", "green")
+    elif bb_pos > 80: signals["BB"] = ("ABOVE UPPER", "red")
+    else:             signals["BB"] = ("WITHIN BAND", "neutral")
 
-    if vol_surge:
-        signals["VOL"] = ("SURGE ⚡", "green")
-        if buy_score > sell_score: buy_score += 1
-        else: sell_score += 1
-    else: signals["VOL"] = ("NORMAL", "neutral")
+    if vol_ratio >= 1.5: signals["VOL"] = ("SURGE ⚡", "green")
+    else:                signals["VOL"] = ("NORMAL", "neutral")
 
-    total_score = buy_score + sell_score
-    strength = int((max(buy_score, sell_score) / max(total_score, 1)) * 100)
-
+    # ── RAW VALUES ─────────────────────────────
     indicators = {
         "RSI": round(rsi, 2),
-        "MACD": round(macd, 6),
+        "MACD": round(macd_val, 6),
         "Stoch %K": round(stoch_k, 2),
-        "EMA20": round(ema20, 5),
-        "EMA50": round(ema50, 5),
-        "EMA200": round(ema200, 5),
+        "BB_pos": round(bb_pos, 1),
+        "EMA20": round(ema20_val, 5),
+        "EMA50": round(ema50_val, 5),
+        "EMA200": round(ema200_val, 5),
     }
 
-    if buy_score >= 5: return "BUY", f"Strong buy — {buy_score} bullish indicators", signals, indicators, strength
-    elif sell_score >= 5: return "SELL", f"Strong sell — {sell_score} bearish indicators", signals, indicators, strength
-    elif buy_score > sell_score: return "BUY", f"Weak buy — {buy_score} vs {sell_score} indicators", signals, indicators, strength
-    elif sell_score > buy_score: return "SELL", f"Weak sell — {sell_score} vs {buy_score} indicators", signals, indicators, strength
-    else: return "HOLD", "Mixed signals — market indecisive", signals, indicators, strength
+    score_detail = {
+        "trend":          trend_score,
+        "trend_max":      35,
+        "momentum":       momentum_score,
+        "momentum_max":   25,
+        "structure":      structure_score,
+        "structure_max":  20,
+        "mtf":            mtf_score,
+        "mtf_max":        15,
+        "volume":         volume_score,
+        "volume_max":     5,
+        "total":          total_score,
+        "bias":           signal,
+    }
+
+    return signal, reason, signals, indicators, confidence, score_detail
 
 # ─────────────────────────────────────────────
 #  MULTI TIMEFRAME
@@ -245,8 +432,8 @@ def multi_timeframe_analysis(symbol):
     results = []
     for label, tf, limit in timeframes:
         df = get_mt5_klines(symbol, tf, limit)
-        signal, reason, _, _, strength = calculate_signal(df)
-        results.append((label, signal, reason, strength))
+        signal, reason, _, _, confidence, score_detail = calculate_signal(df)
+        results.append((label, signal, reason, confidence))
     return results
 
 # ─────────────────────────────────────────────
@@ -457,7 +644,7 @@ with tab1:
     with col_signal:
         st.markdown('<p class="section-header">AI Signal</p>', unsafe_allow_html=True)
         if df is not None:
-            signal, reason, signals, indicators, strength = calculate_signal(df)
+            signal, reason, signals, indicators, confidence, score_detail = calculate_signal(df)
             signal_class = f"signal-{signal.lower()}"
             signal_emoji = "🟢" if signal == "BUY" else "🔴" if signal == "SELL" else "🔵"
             strength_color = "#3fb950" if signal == "BUY" else "#f85149" if signal == "SELL" else "#388bfd"
@@ -467,9 +654,41 @@ with tab1:
                 <p class="signal-text">{signal_emoji} {signal}</p>
                 <p class="signal-reason">{reason}</p>
                 <div class="strength-bar-container">
-                    <div class="strength-bar-fill" style="width:{strength}%; background:{strength_color};"></div>
+                    <div class="strength-bar-fill" style="width:{confidence}%; background:{strength_color};"></div>
                 </div>
-                <p style="color:#8b949e; font-size:11px;">Strength: {strength}%</p>
+                <p style="color:#8b949e; font-size:11px;">Confidence: {confidence}%</p>
+            </div>
+            """, unsafe_allow_html=True)
+
+            # ── Score Breakdown ──────────────────
+            st.markdown("<br>", unsafe_allow_html=True)
+            st.markdown('<p class="section-header">Score Breakdown</p>', unsafe_allow_html=True)
+
+            score_rows = [
+                ("Trend",     score_detail["trend"],     score_detail["trend_max"],     "#388bfd"),
+                ("Momentum",  score_detail["momentum"],  score_detail["momentum_max"],  "#d2a8ff"),
+                ("Structure", score_detail["structure"], score_detail["structure_max"], "#f0883e"),
+                ("MTF",       score_detail["mtf"],       score_detail["mtf_max"],       "#79c0ff"),
+                ("Volume",    score_detail["volume"],    score_detail["volume_max"],    "#56d364"),
+            ]
+            for label_s, val, max_val, bar_color in score_rows:
+                pct = int(val / max_val * 100)
+                st.markdown(f"""
+                <div style="margin-bottom:8px;">
+                    <div style="display:flex; justify-content:space-between; margin-bottom:3px;">
+                        <span style="color:#8b949e; font-size:11px;">{label_s}</span>
+                        <span style="color:#e6edf3; font-size:11px; font-weight:700;">{val}/{max_val}</span>
+                    </div>
+                    <div class="strength-bar-container">
+                        <div class="strength-bar-fill" style="width:{pct}%; background:{bar_color};"></div>
+                    </div>
+                </div>
+                """, unsafe_allow_html=True)
+
+            st.markdown(f"""
+            <div style="display:flex; justify-content:space-between; padding:6px 0; border-top:1px solid #30363d; margin-top:4px;">
+                <span style="color:#e6edf3; font-size:12px; font-weight:700;">TOTAL</span>
+                <span style="color:{strength_color}; font-size:14px; font-weight:800;">{score_detail["total"]}/100</span>
             </div>
             """, unsafe_allow_html=True)
 
@@ -572,7 +791,7 @@ with tab2:
 
     col_mtf1, col_mtf2, col_mtf3 = st.columns(3)
     cols = [col_mtf1, col_mtf2, col_mtf3]
-    for i, (label, sig, reason, strength) in enumerate(mtf_results):
+    for i, (label, sig, reason, confidence) in enumerate(mtf_results):
         color = "#3fb950" if sig == "BUY" else "#f85149" if sig == "SELL" else "#388bfd"
         emoji = "🟢" if sig == "BUY" else "🔴" if sig == "SELL" else "🔵"
         with cols[i]:
@@ -580,8 +799,8 @@ with tab2:
             <div class="mtf-card mtf-{sig.lower()}">
                 <p style="color:#8b949e; font-size:11px; text-transform:uppercase; letter-spacing:1px; margin:0;">{label}</p>
                 <p style="font-size:22px; font-weight:800; color:{color}; margin:8px 0;">{emoji} {sig}</p>
-                <div class="strength-bar-container"><div class="strength-bar-fill" style="width:{strength}%; background:{color};"></div></div>
-                <p style="color:#8b949e; font-size:11px; margin:4px 0;">Strength: {strength}%</p>
+                <div class="strength-bar-container"><div class="strength-bar-fill" style="width:{confidence}%; background:{color};"></div></div>
+                <p style="color:#8b949e; font-size:11px; margin:4px 0;">Confidence: {confidence}%</p>
                 <p style="color:#8b949e; font-size:11px; margin:0;">{reason}</p>
             </div>
             """, unsafe_allow_html=True)
@@ -652,7 +871,7 @@ with tab4:
             💰 Balance: <span style="color:#3fb950;">${account.balance:,.2f} {account.currency}</span><br>
             📊 Leverage: <span style="color:#e6edf3;">1:{account.leverage}</span><br>
             🔗 Status: <span style="color:#3fb950;">🟢 Connected</span><br>
-            Ⓥ Version: <span style="color:#e6edf3;">v2.3.5 (Secure)</span><br>
+            Ⓥ Version: <span style="color:#e6edf3;">v2.3.6 (Secure)</span><br>
             </p>
         </div>
         """, unsafe_allow_html=True)
