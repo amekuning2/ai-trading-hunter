@@ -103,9 +103,12 @@ TIMEFRAME_MAP = {
 @st.cache_data(ttl=30)
 def get_mt5_price(symbol):
     try:
+        mt5.symbol_select(symbol, True)
         tick = mt5.symbol_info_tick(symbol)
         info = mt5.symbol_info(symbol)
         if tick is None or info is None:
+            return None
+        if tick.bid == 0.0 and tick.ask == 0.0:
             return None
         return {
             "bid": tick.bid,
@@ -119,6 +122,7 @@ def get_mt5_price(symbol):
 @st.cache_data(ttl=60)
 def get_mt5_klines(symbol, timeframe_str, limit):
     try:
+        mt5.symbol_select(symbol, True)
         tf = TIMEFRAME_MAP.get(timeframe_str, mt5.TIMEFRAME_H1)
         rates = mt5.copy_rates_from_pos(symbol, tf, 0, limit)
         if rates is None:
@@ -977,7 +981,7 @@ with tab4:
             💰 Balance: <span style="color:#3fb950;">${account.balance:,.2f} {account.currency}</span><br>
             📊 Leverage: <span style="color:#e6edf3;">1:{account.leverage}</span><br>
             🔗 Status: <span style="color:#3fb950;">🟢 Connected</span><br>
-            Ⓥ Version: <span style="color:#e6edf3;">v2.3.7 (Secure)</span><br>
+            Ⓥ Version: <span style="color:#e6edf3;">v2.3.7a (Secure)</span><br>
             </p>
         </div>
         """, unsafe_allow_html=True)
