@@ -425,6 +425,91 @@ def calculate_signal(df, mtf_score_override=None):
     return signal, reason, signals, indicators, confidence, score_detail
 
 # ─────────────────────────────────────────────
+#  TRADE DECISION ENGINE
+#  Input  : signal, score_detail, df, supports, resistances
+#  Output : decision ("ENTER"|"WAIT"|"SKIP"), reason, color
+# ─────────────────────────────────────────────
+def calculate_trade_decision(signal, score_detail, df, supports, resistances):
+    """
+    ENTER : semua syarat terpenuhi, setup bagus, masuk sekarang
+    WAIT  : sinyal ada tapi salah satu syarat belum ideal
+    SKIP  : kondisi jelek / RR buruk / sinyal HOLD
+    """
+    if signal == "HOLD":
+        return "SKIP", "Sinyal HOLD — tidak ada setup", "#8b949e"
+
+    total       = score_detail["total"]
+    trend       = score_detail["trend"]
+    momentum    = score_detail["momentum"]
+    structure   = score_detail["structure"]
+    mtf         = score_detail["mtf"]
+
+    # ── ATR & RR check ─────────────────────────
+    try:
+        atr = ta.volatility.AverageTrueRange(
+            df["high"], df["low"], df["close"], window=14
+        ).average_true_range().iloc[-1]
+        current_price = df["close"].iloc[-1]
+
+        if signal == "BUY":
+            sl_price  = current_price - (atr * 1.5)
+            tp1_price = current_price + (atr * 2.0)
+        else:
+            sl_price  = current_price + (atr * 1.5)
+            tp1_price = current_price - (atr * 2.0)
+
+        sl_dist  = abs(current_price - sl_price)
+        tp_dist  = abs(tp1_price - current_price)
+        rr_ratio = tp_dist / sl_dist if sl_dist > 0 else 0
+
+    except Exception:
+        rr_ratio = 0
+
+    # ── Structure: harga dekat S/R yang tepat? ─
+    structure_ok = False
+    if signal == "BUY" and supports:
+        dist_pct = abs(current_price - supports[0]) / current_price * 100
+        structure_ok = dist_pct <= 1.5
+    elif signal == "SELL" and resistances:
+        dist_pct = abs(resistances[0] - current_price) / current_price * 100
+        structure_ok = dist_pct <= 1.5
+    else:
+        structure_ok = structure >= 12
+
+    # ── Decision logic ─────────────────────────
+    reasons_wait = []
+
+    if total < 50:
+        return "SKIP", f"Score terlalu rendah ({total}/100) — jangan masuk", "#f85149"
+
+    if rr_ratio < 1.0:
+        return "SKIP", f"RR {rr_ratio:.2f} — reward tidak sepadan risiko", "#f85149"
+
+    if trend < 15:
+        reasons_wait.append("trend lemah")
+
+    if momentum < 12:
+        reasons_wait.append("momentum belum konfirmasi")
+
+    if rr_ratio < 1.5:
+        reasons_wait.append(f"RR {rr_ratio:.2f} masih marginal")
+
+    if mtf < 6:
+        reasons_wait.append("MTF belum searah")
+
+    if not structure_ok:
+        reasons_wait.append("belum di zona S/R ideal")
+
+    if not reasons_wait and total >= 60 and rr_ratio >= 1.5:
+        return "ENTER", f"Setup solid — Score {total}/100, RR 1:{rr_ratio:.1f}", "#3fb950"
+
+    if reasons_wait:
+        note = ", ".join(reasons_wait[:2])
+        return "WAIT", f"Tunggu: {note}", "#f0883e"
+
+    return "ENTER", f"Setup cukup — Score {total}/100, RR 1:{rr_ratio:.1f}", "#3fb950"
+
+# ─────────────────────────────────────────────
 #  MULTI TIMEFRAME
 # ─────────────────────────────────────────────
 def multi_timeframe_analysis(symbol):
@@ -645,9 +730,17 @@ with tab1:
         st.markdown('<p class="section-header">AI Signal</p>', unsafe_allow_html=True)
         if df is not None:
             signal, reason, signals, indicators, confidence, score_detail = calculate_signal(df)
+            decision, decision_reason, decision_color = calculate_trade_decision(
+                signal, score_detail, df, supports, resistances
+            )
             signal_class = f"signal-{signal.lower()}"
             signal_emoji = "🟢" if signal == "BUY" else "🔴" if signal == "SELL" else "🔵"
             strength_color = "#3fb950" if signal == "BUY" else "#f85149" if signal == "SELL" else "#388bfd"
+
+            decision_emoji = "🟢" if decision == "ENTER" else "🟡" if decision == "WAIT" else "🔴"
+            decision_bg    = "rgba(63,185,80,0.12)"  if decision == "ENTER" else \
+                             "rgba(240,136,62,0.12)" if decision == "WAIT"  else \
+                             "rgba(248,81,73,0.08)"
 
             st.markdown(f"""
             <div class="{signal_class}">
@@ -657,6 +750,19 @@ with tab1:
                     <div class="strength-bar-fill" style="width:{confidence}%; background:{strength_color};"></div>
                 </div>
                 <p style="color:#8b949e; font-size:11px;">Confidence: {confidence}%</p>
+                <div style="
+                    margin-top:14px;
+                    background:{decision_bg};
+                    border:1px solid {decision_color};
+                    border-radius:6px;
+                    padding:10px 12px;
+                    text-align:center;
+                ">
+                    <p style="font-size:18px; font-weight:900; color:{decision_color}; margin:0; letter-spacing:3px;">
+                        {decision_emoji} {decision}
+                    </p>
+                    <p style="color:#8b949e; font-size:11px; margin:4px 0 0 0;">{decision_reason}</p>
+                </div>
             </div>
             """, unsafe_allow_html=True)
 
@@ -871,7 +977,7 @@ with tab4:
             💰 Balance: <span style="color:#3fb950;">${account.balance:,.2f} {account.currency}</span><br>
             📊 Leverage: <span style="color:#e6edf3;">1:{account.leverage}</span><br>
             🔗 Status: <span style="color:#3fb950;">🟢 Connected</span><br>
-            Ⓥ Version: <span style="color:#e6edf3;">v2.3.6 (Secure)</span><br>
+            Ⓥ Version: <span style="color:#e6edf3;">v2.3.7 (Secure)</span><br>
             </p>
         </div>
         """, unsafe_allow_html=True)
