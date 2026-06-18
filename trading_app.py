@@ -968,7 +968,7 @@ with tab4:
     st.markdown(f"""
     <div style="background:#161b22; border:1px solid #30363d; border-radius:8px; padding:16px;">
         <p style="color:#8b949e; font-size:12px; margin:0;">
-        Version: <span style="color:#e6edf3;">v2.2 (Secure)</span><br>
+        Version: <span style="color:#e6edf3;">v2.3.5 (Secure)</span><br>
         Exchange: <span style="color:#e6edf3;">Binance Spot</span><br>
         Features: <span style="color:#e6edf3;">Multi-TF · S&R · Stochastic · EMA200</span><br>
         Status: <span style="color:#3fb950;">🟢 Running (Secure Mode)</span>

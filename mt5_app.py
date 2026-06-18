@@ -652,6 +652,7 @@ with tab4:
             💰 Balance: <span style="color:#3fb950;">${account.balance:,.2f} {account.currency}</span><br>
             📊 Leverage: <span style="color:#e6edf3;">1:{account.leverage}</span><br>
             🔗 Status: <span style="color:#3fb950;">🟢 Connected</span>
+            Ⓥ Version: <span style="color:#e6edf3;">v2.3.5 (Secure)</span><br>
             </p>
         </div>
         """, unsafe_allow_html=True)
