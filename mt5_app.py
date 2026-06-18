@@ -651,7 +651,7 @@ with tab4:
             🏦 Server: <span style="color:#e6edf3;">{account.server}</span><br>
             💰 Balance: <span style="color:#3fb950;">${account.balance:,.2f} {account.currency}</span><br>
             📊 Leverage: <span style="color:#e6edf3;">1:{account.leverage}</span><br>
-            🔗 Status: <span style="color:#3fb950;">🟢 Connected</span>
+            🔗 Status: <span style="color:#3fb950;">🟢 Connected</span><br>
             Ⓥ Version: <span style="color:#e6edf3;">v2.3.5 (Secure)</span><br>
             </p>
         </div>
