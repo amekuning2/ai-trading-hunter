@@ -953,7 +953,7 @@ with col_sel2:
         symbol = custom.upper()
 
 # Tabs
-tab1, tab2, tab3, tab4 = st.tabs(["📊 Dashboard", "🕐 Multi-Timeframe", "🔥 Top Gainers", "⚙️ Settings"])
+tab1, tab2, tab3, tab4, tab5 = st.tabs(["📊 Dashboard", "🕐 Multi-Timeframe", "🔥 Top Gainers", "🧪 Backtesting", "⚙️ Settings"])
 
 # ─── TAB 1: DASHBOARD ───
 with tab1:
@@ -1354,8 +1354,219 @@ with tab3:
     else:
         st.info("Gagal load data gainers. Cek koneksi API.")
 
-# ─── TAB 4: SETTINGS ───
+# ─── TAB 4: BACKTESTING ───
 with tab4:
+    st.markdown('<p class="section-header">🧪 Backtesting Engine</p>', unsafe_allow_html=True)
+    st.markdown("<p style='color:#8b949e; font-size:13px;'>Simulasi signal engine di data historis — lihat win rate, profit/loss, dan RR ratio.</p>", unsafe_allow_html=True)
+
+    col_bt1, col_bt2, col_bt3 = st.columns(3)
+    with col_bt1:
+        bt_symbol = st.text_input("Symbol", value=symbol)
+    with col_bt2:
+        bt_interval = st.selectbox("Timeframe", [
+            ("1 Hour", "1h"), ("4 Hours", "4h"), ("1 Day", "1d")
+        ], format_func=lambda x: x[0], index=0)
+        bt_interval_val = bt_interval[1]
+    with col_bt3:
+        bt_candles = st.slider("Candles (data historis)", 100, 1000, 500)
+
+    bt_modal = st.number_input("💵 Modal per Trade (USDT)", min_value=1.0, value=100.0, step=10.0)
+
+    if st.button("▶️ Jalankan Backtest", use_container_width=True):
+        with st.spinner("Mengambil data historis dan menjalankan simulasi..."):
+            df_bt = get_klines(bt_symbol, bt_interval_val, bt_candles, BINANCE_API_KEY, BINANCE_API_SECRET)
+
+        if df_bt is None or len(df_bt) < 100:
+            st.error("Data tidak cukup untuk backtest. Coba tambah jumlah candles.")
+        else:
+            # ── Run backtest ──────────────────────────
+            trades      = []
+            min_window  = 50   # butuh minimal 50 candle untuk indikator
+
+            for i in range(min_window, len(df_bt) - 1):
+                df_slice = df_bt.iloc[:i+1].copy()
+                signal_bt, _, _, _, confidence_bt, score_bt = calculate_signal(df_slice)
+
+                if signal_bt == "HOLD":
+                    continue
+                if score_bt["total"] < 55:
+                    continue
+
+                entry_price = df_bt["close"].iloc[i]
+                atr_bt = ta.volatility.AverageTrueRange(
+                    df_slice["high"], df_slice["low"], df_slice["close"], window=14
+                ).average_true_range().iloc[-1]
+
+                if signal_bt == "BUY":
+                    sl_bt  = entry_price - (atr_bt * 1.5)
+                    tp1_bt = entry_price + (atr_bt * 2.0)
+                    tp2_bt = entry_price + (atr_bt * 3.5)
+                else:
+                    sl_bt  = entry_price + (atr_bt * 1.5)
+                    tp1_bt = entry_price - (atr_bt * 2.0)
+                    tp2_bt = entry_price - (atr_bt * 3.5)
+
+                # Simulasi: cek 10 candle ke depan
+                outcome    = "OPEN"
+                exit_price = None
+                exit_candle = None
+                lookahead  = min(10, len(df_bt) - i - 1)
+
+                for j in range(1, lookahead + 1):
+                    future_high = df_bt["high"].iloc[i + j]
+                    future_low  = df_bt["low"].iloc[i + j]
+
+                    if signal_bt == "BUY":
+                        if future_low <= sl_bt:
+                            outcome    = "LOSS"
+                            exit_price = sl_bt
+                            exit_candle = j
+                            break
+                        elif future_high >= tp1_bt:
+                            outcome    = "WIN"
+                            exit_price = tp1_bt
+                            exit_candle = j
+                            break
+                    else:
+                        if future_high >= sl_bt:
+                            outcome    = "LOSS"
+                            exit_price = sl_bt
+                            exit_candle = j
+                            break
+                        elif future_low <= tp1_bt:
+                            outcome    = "WIN"
+                            exit_price = tp1_bt
+                            exit_candle = j
+                            break
+
+                if outcome == "OPEN":
+                    continue
+
+                qty         = bt_modal / entry_price
+                if signal_bt == "BUY":
+                    pnl = (exit_price - entry_price) * qty
+                else:
+                    pnl = (entry_price - exit_price) * qty
+
+                sl_dist  = abs(entry_price - sl_bt)
+                tp_dist  = abs(tp1_bt - entry_price)
+                rr_actual = round(tp_dist / sl_dist, 2) if sl_dist > 0 else 0
+
+                trades.append({
+                    "candle":      i,
+                    "timestamp":   df_bt["timestamp"].iloc[i].strftime("%Y-%m-%d %H:%M") if hasattr(df_bt["timestamp"].iloc[i], "strftime") else str(df_bt["timestamp"].iloc[i]),
+                    "signal":      signal_bt,
+                    "entry":       round(entry_price, 4),
+                    "exit":        round(exit_price, 4),
+                    "outcome":     outcome,
+                    "pnl":         round(pnl, 2),
+                    "rr":          rr_actual,
+                    "score":       score_bt["total"],
+                    "exit_candle": exit_candle,
+                })
+
+            # ── Summary ───────────────────────────────
+            if not trades:
+                st.warning("Tidak ada trade yang tereksekusi. Coba kurangi threshold score atau tambah candles.")
+            else:
+                total_trades = len(trades)
+                wins         = [t for t in trades if t["outcome"] == "WIN"]
+                losses       = [t for t in trades if t["outcome"] == "LOSS"]
+                win_rate     = round(len(wins) / total_trades * 100, 1)
+                total_pnl    = round(sum(t["pnl"] for t in trades), 2)
+                avg_win      = round(sum(t["pnl"] for t in wins) / len(wins), 2) if wins else 0
+                avg_loss     = round(sum(t["pnl"] for t in losses) / len(losses), 2) if losses else 0
+                avg_rr       = round(sum(t["rr"] for t in trades) / total_trades, 2)
+                avg_score    = round(sum(t["score"] for t in trades) / total_trades, 1)
+
+                pnl_color  = "#3fb950" if total_pnl >= 0 else "#f85149"
+                wr_color   = "#3fb950" if win_rate >= 55 else "#f0883e" if win_rate >= 45 else "#f85149"
+
+                # Summary cards
+                st.markdown("<br>", unsafe_allow_html=True)
+                c1, c2, c3, c4, c5 = st.columns(5)
+                metrics = [
+                    (c1, "Total Trade",  str(total_trades),            "#e6edf3"),
+                    (c2, "Win Rate",     f"{win_rate}%",               wr_color),
+                    (c3, "Total P&L",    f"{'+'if total_pnl>=0 else ''}{total_pnl} USDT", pnl_color),
+                    (c4, "Avg RR",       f"1:{avg_rr}",                "#388bfd"),
+                    (c5, "Avg Score",    f"{avg_score}/100",           "#d2a8ff"),
+                ]
+                for col, label, val, color in metrics:
+                    with col:
+                        st.markdown(f"""
+                        <div style="background:#161b22; border:1px solid #30363d; border-radius:8px; padding:14px; text-align:center;">
+                            <p style="color:#8b949e; font-size:11px; margin:0 0 6px 0; text-transform:uppercase;">{label}</p>
+                            <p style="color:{color}; font-size:22px; font-weight:800; margin:0;">{val}</p>
+                        </div>
+                        """, unsafe_allow_html=True)
+
+                st.markdown("<br>", unsafe_allow_html=True)
+
+                # Win/Loss breakdown
+                col_wl1, col_wl2 = st.columns(2)
+                with col_wl1:
+                    st.markdown(f"""
+                    <div style="background:#161b22; border:1px solid #30363d; border-radius:8px; padding:14px;">
+                        <p style="color:#8b949e; font-size:11px; text-transform:uppercase; margin:0 0 10px 0;">Win Summary</p>
+                        <div style="display:flex; justify-content:space-between; padding:4px 0;">
+                            <span style="color:#8b949e; font-size:12px;">Total Win</span>
+                            <span style="color:#3fb950; font-weight:700;">{len(wins)} trade</span>
+                        </div>
+                        <div style="display:flex; justify-content:space-between; padding:4px 0;">
+                            <span style="color:#8b949e; font-size:12px;">Avg Profit</span>
+                            <span style="color:#3fb950; font-weight:700;">+{avg_win} USDT</span>
+                        </div>
+                        <div style="display:flex; justify-content:space-between; padding:4px 0;">
+                            <span style="color:#8b949e; font-size:12px;">Total Profit</span>
+                            <span style="color:#3fb950; font-weight:700;">+{round(sum(t["pnl"] for t in wins),2)} USDT</span>
+                        </div>
+                    </div>
+                    """, unsafe_allow_html=True)
+                with col_wl2:
+                    st.markdown(f"""
+                    <div style="background:#161b22; border:1px solid #30363d; border-radius:8px; padding:14px;">
+                        <p style="color:#8b949e; font-size:11px; text-transform:uppercase; margin:0 0 10px 0;">Loss Summary</p>
+                        <div style="display:flex; justify-content:space-between; padding:4px 0;">
+                            <span style="color:#8b949e; font-size:12px;">Total Loss</span>
+                            <span style="color:#f85149; font-weight:700;">{len(losses)} trade</span>
+                        </div>
+                        <div style="display:flex; justify-content:space-between; padding:4px 0;">
+                            <span style="color:#8b949e; font-size:12px;">Avg Loss</span>
+                            <span style="color:#f85149; font-weight:700;">{avg_loss} USDT</span>
+                        </div>
+                        <div style="display:flex; justify-content:space-between; padding:4px 0;">
+                            <span style="color:#8b949e; font-size:12px;">Total Loss</span>
+                            <span style="color:#f85149; font-weight:700;">{round(sum(t["pnl"] for t in losses),2)} USDT</span>
+                        </div>
+                    </div>
+                    """, unsafe_allow_html=True)
+
+                st.markdown("<br>", unsafe_allow_html=True)
+
+                # Trade history table
+                st.markdown('<p class="section-header">Trade History</p>', unsafe_allow_html=True)
+                for t in reversed(trades[-30:]):   # tampil 30 trade terakhir
+                    outcome_color = "#3fb950" if t["outcome"] == "WIN" else "#f85149"
+                    signal_color  = "#3fb950" if t["signal"] == "BUY" else "#f85149"
+                    pnl_sign      = "+" if t["pnl"] >= 0 else ""
+                    st.markdown(f"""
+                    <div style="display:flex; justify-content:space-between; align-items:center;
+                         padding:8px 12px; margin:3px 0; background:#161b22;
+                         border:1px solid #30363d; border-radius:6px; font-size:12px;">
+                        <span style="color:#8b949e; width:130px;">{t["timestamp"]}</span>
+                        <span style="color:{signal_color}; font-weight:700; width:45px;">{t["signal"]}</span>
+                        <span style="color:#e6edf3; width:80px;">Entry: ${t["entry"]}</span>
+                        <span style="color:#e6edf3; width:80px;">Exit: ${t["exit"]}</span>
+                        <span style="color:#8b949e; width:60px;">RR 1:{t["rr"]}</span>
+                        <span style="color:#8b949e; width:60px;">Score: {t["score"]}</span>
+                        <span style="color:{outcome_color}; font-weight:700; width:80px;">{t["outcome"]}</span>
+                        <span style="color:{outcome_color}; font-weight:700;">{pnl_sign}{t["pnl"]} USDT</span>
+                    </div>
+                    """, unsafe_allow_html=True)
+
+# ─── TAB 5: SETTINGS ───
+with tab5:
     st.markdown('<p class="section-header">⚙️ Settings</p>', unsafe_allow_html=True)
 
     st.markdown("**🔄 Auto Refresh**")
@@ -1371,7 +1582,7 @@ with tab4:
     st.markdown(f"""
     <div style="background:#161b22; border:1px solid #30363d; border-radius:8px; padding:16px;">
         <p style="color:#8b949e; font-size:12px; margin:0;">
-        Version: <span style="color:#e6edf3;">v2.3.9 (Secure)</span><br>
+        Version: <span style="color:#e6edf3;">v2.3.9a (Secure)</span><br>
         Exchange: <span style="color:#e6edf3;">Binance Spot</span><br>
         Features: <span style="color:#e6edf3;">Multi-TF · S&R · Stochastic · EMA200</span><br>
         Status: <span style="color:#3fb950;">🟢 Running (Secure Mode)</span>
