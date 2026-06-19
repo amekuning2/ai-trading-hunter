@@ -706,8 +706,6 @@ def get_support_resistance(df, n=3):
 # ─────────────────────────────────────────────
 def generate_trading_plan(df, price_data, signal, supports, resistances, modal_usdt=100):
     current_price = price_data["price"]
-    high_24h = price_data["high"]
-    low_24h = price_data["low"]
 
     if df is None or len(df) < 20:
         return None
@@ -715,73 +713,88 @@ def generate_trading_plan(df, price_data, signal, supports, resistances, modal_u
     atr = ta.volatility.AverageTrueRange(df["high"], df["low"], df["close"], window=14).average_true_range().iloc[-1]
 
     if signal == "BUY":
-        entry = round(current_price * 0.999, 4)
-        sl = round(entry - (atr * 1.5), 4)
-        tp1 = round(entry + (atr * 2), 4)
-        tp2 = round(entry + (atr * 3.5), 4)
-        tp3 = round(entry + (atr * 5), 4)
-        if supports:
-            sl = min(sl, round(supports[0] * 0.998, 4))
+        entry = round(current_price, 4)
+        # SL: ATR-based, diperkuat oleh support terdekat
+        sl_atr  = round(entry - (atr * 1.5), 4)
+        sl_sr   = round(supports[0] * 0.998, 4) if supports else sl_atr
+        sl      = min(sl_atr, sl_sr)           # ambil yang lebih jauh (proteksi lebih)
+        # TP: ATR-based, dihalangi resistance
+        tp1_atr = round(entry + (atr * 2.0), 4)
+        tp2_atr = round(entry + (atr * 3.5), 4)
+        tp3_atr = round(entry + (atr * 5.0), 4)
         if resistances:
-            nearest_resistance = round(resistances[0] * 0.999, 4)
-            if nearest_resistance > entry:
-                tp1 = min(tp1, nearest_resistance)
-
-        # Safety validation
+            r1 = round(resistances[0] * 0.999, 4)
+            tp1 = min(tp1_atr, r1) if r1 > entry else tp1_atr
+        else:
+            tp1 = tp1_atr
+        tp2 = tp2_atr
+        tp3 = tp3_atr
+        # Safety: pastikan urutan tp1 < tp2 < tp3
         tp1 = max(tp1, round(entry * 1.001, 4))
-        tp2 = max(tp2, round(tp1 * 1.001, 4))
-        tp3 = max(tp3, round(tp2 * 1.001, 4))
-        sl = min(sl, round(entry * 0.995, 4))
+        tp2 = max(tp2, round(tp1  * 1.002, 4))
+        tp3 = max(tp3, round(tp2  * 1.002, 4))
+        sl  = min(sl,  round(entry * 0.995, 4))
 
     elif signal == "SELL":
-        entry = round(current_price * 1.001, 4)
-        sl = round(entry + (atr * 1.5), 4)
-        tp1 = round(entry - (atr * 2), 4)
-        tp2 = round(entry - (atr * 3.5), 4)
-        tp3 = round(entry - (atr * 5), 4)
-        if resistances:
-            sl = max(sl, round(resistances[0] * 1.002, 4))
+        entry = round(current_price, 4)
+        sl_atr  = round(entry + (atr * 1.5), 4)
+        sl_sr   = round(resistances[0] * 1.002, 4) if resistances else sl_atr
+        sl      = max(sl_atr, sl_sr)
+        tp1_atr = round(entry - (atr * 2.0), 4)
+        tp2_atr = round(entry - (atr * 3.5), 4)
+        tp3_atr = round(entry - (atr * 5.0), 4)
         if supports:
-            nearest_support = round(supports[0] * 1.001, 4)
-            if nearest_support < entry:
-                tp1 = max(tp1, nearest_support)
-
-        # Safety validation
+            s1 = round(supports[0] * 1.001, 4)
+            tp1 = max(tp1_atr, s1) if s1 < entry else tp1_atr
+        else:
+            tp1 = tp1_atr
+        tp2 = tp2_atr
+        tp3 = tp3_atr
         tp1 = min(tp1, round(entry * 0.999, 4))
-        tp2 = min(tp2, round(tp1 * 0.999, 4))
-        tp3 = min(tp3, round(tp2 * 0.999, 4))
-        sl = max(sl, round(entry * 1.005, 4))
+        tp2 = min(tp2, round(tp1  * 0.998, 4))
+        tp3 = min(tp3, round(tp2  * 0.998, 4))
+        sl  = max(sl,  round(entry * 1.005, 4))
     else:
         return None
 
-    sl_pct = abs((sl - entry) / entry * 100)
-    tp1_pct = abs((tp1 - entry) / entry * 100)
-    tp2_pct = abs((tp2 - entry) / entry * 100)
+    sl_pct   = abs((sl  - entry) / entry * 100)
+    tp1_pct  = abs((tp1 - entry) / entry * 100)
+    tp2_pct  = abs((tp2 - entry) / entry * 100)
+    tp3_pct  = abs((tp3 - entry) / entry * 100)
     rr_ratio = round(tp1_pct / sl_pct, 2) if sl_pct > 0 else 0
 
     qty = round(modal_usdt / entry, 6)
 
-    profit_tp1 = round((tp1 - entry) * qty if signal == "BUY" else (entry - tp1) * qty, 2)
-    profit_tp2 = round((tp2 - entry) * qty if signal == "BUY" else (entry - tp2) * qty, 2)
+    if signal == "BUY":
+        profit_tp1 = round((tp1 - entry) * qty, 2)
+        profit_tp2 = round((tp2 - entry) * qty, 2)
+        profit_tp3 = round((tp3 - entry) * qty, 2)
+    else:
+        profit_tp1 = round((entry - tp1) * qty, 2)
+        profit_tp2 = round((entry - tp2) * qty, 2)
+        profit_tp3 = round((entry - tp3) * qty, 2)
+
     loss_sl = round(abs((sl - entry) * qty), 2)
 
     return {
-        "signal": signal,
-        "entry": entry,
-        "sl": sl,
-        "tp1": tp1,
-        "tp2": tp2,
-        "tp3": tp3,
-        "sl_pct": round(sl_pct, 2),
-        "tp1_pct": round(tp1_pct, 2),
-        "tp2_pct": round(tp2_pct, 2),
-        "rr_ratio": rr_ratio,
-        "qty": qty,
-        "modal": modal_usdt,
+        "signal":     signal,
+        "entry":      entry,
+        "sl":         sl,
+        "tp1":        tp1,
+        "tp2":        tp2,
+        "tp3":        tp3,
+        "sl_pct":     round(sl_pct,  2),
+        "tp1_pct":    round(tp1_pct, 2),
+        "tp2_pct":    round(tp2_pct, 2),
+        "tp3_pct":    round(tp3_pct, 2),
+        "rr_ratio":   rr_ratio,
+        "qty":        qty,
+        "modal":      modal_usdt,
         "profit_tp1": profit_tp1,
         "profit_tp2": profit_tp2,
-        "loss_sl": loss_sl,
-        "atr": round(atr, 4),
+        "profit_tp3": profit_tp3,
+        "loss_sl":    loss_sl,
+        "atr":        round(atr, 4),
     }
 def build_chart(df, symbol, resistances=[], supports=[]):
     fig = make_subplots(
@@ -1107,6 +1120,10 @@ with tab1:
                         <span class="tp-label">TP 2</span>
                         <span class="tp-value tp-green">${plan["tp2"]:,.4f} (+{plan["tp2_pct"]}%)</span>
                     </div>
+                    <div class="tp-row">
+                        <span class="tp-label">TP 3</span>
+                        <span class="tp-value tp-green">${plan["tp3"]:,.4f} (+{plan["tp3_pct"]}%)</span>
+                    </div>
                 </div>
                 """, unsafe_allow_html=True)
 
@@ -1144,6 +1161,10 @@ with tab1:
                     <div class="tp-row">
                         <span class="tp-label">Profit TP2</span>
                         <span class="tp-value tp-green">+${plan["profit_tp2"]}</span>
+                    </div>
+                    <div class="tp-row">
+                        <span class="tp-label">Profit TP3</span>
+                        <span class="tp-value tp-green">+${plan["profit_tp3"]}</span>
                     </div>
                     <div class="tp-row">
                         <span class="tp-label">Max Loss</span>
@@ -1285,7 +1306,7 @@ with tab4:
     st.markdown(f"""
     <div style="background:#161b22; border:1px solid #30363d; border-radius:8px; padding:16px;">
         <p style="color:#8b949e; font-size:12px; margin:0;">
-        Version: <span style="color:#e6edf3;">v2.3.7 (Secure)</span><br>
+        Version: <span style="color:#e6edf3;">v2.3.8 (Secure)</span><br>
         Exchange: <span style="color:#e6edf3;">Binance Spot</span><br>
         Features: <span style="color:#e6edf3;">Multi-TF · S&R · Stochastic · EMA200</span><br>
         Status: <span style="color:#3fb950;">🟢 Running (Secure Mode)</span>

@@ -551,41 +551,92 @@ def get_support_resistance(df, n=3):
 def generate_trading_plan(df, current_price, signal, supports, resistances, modal_usd=100, leverage=100):
     if df is None or len(df) < 20 or signal == "HOLD":
         return None
-    atr = ta.volatility.AverageTrueRange(df["high"], df["low"], df["close"], window=14).average_true_range().iloc[-1]
+
+    atr   = ta.volatility.AverageTrueRange(df["high"], df["low"], df["close"], window=14).average_true_range().iloc[-1]
+    entry = round(current_price, 5)
 
     if signal == "BUY":
-        entry = round(current_price, 5)
-        sl = round(entry - (atr * 1.5), 5)
-        tp1 = round(entry + (atr * 2), 5)
-        tp2 = round(entry + (atr * 3.5), 5)
-        if supports: sl = min(sl, round(supports[0] * 0.9998, 5))
-        if resistances: tp1 = min(tp1, round(resistances[0] * 0.9999, 5))
-    else:
-        entry = round(current_price, 5)
-        sl = round(entry + (atr * 1.5), 5)
-        tp1 = round(entry - (atr * 2), 5)
-        tp2 = round(entry - (atr * 3.5), 5)
-        if resistances: sl = max(sl, round(resistances[0] * 1.0002, 5))
-        if supports: tp1 = max(tp1, round(supports[0] * 1.0001, 5))
+        sl_atr  = round(entry - (atr * 1.5), 5)
+        sl_sr   = round(supports[0] * 0.9998, 5) if supports else sl_atr
+        sl      = min(sl_atr, sl_sr)
+        tp1_atr = round(entry + (atr * 2.0), 5)
+        tp2_atr = round(entry + (atr * 3.5), 5)
+        tp3_atr = round(entry + (atr * 5.0), 5)
+        if resistances:
+            r1  = round(resistances[0] * 0.9999, 5)
+            tp1 = min(tp1_atr, r1) if r1 > entry else tp1_atr
+        else:
+            tp1 = tp1_atr
+        tp2 = tp2_atr
+        tp3 = tp3_atr
+        tp1 = max(tp1, round(entry * 1.0001, 5))
+        tp2 = max(tp2, round(tp1  * 1.0002, 5))
+        tp3 = max(tp3, round(tp2  * 1.0002, 5))
+        sl  = min(sl,  round(entry * 0.9950, 5))
 
-    sl_pct = abs((sl - entry) / entry * 100)
+    else:  # SELL
+        sl_atr  = round(entry + (atr * 1.5), 5)
+        sl_sr   = round(resistances[0] * 1.0002, 5) if resistances else sl_atr
+        sl      = max(sl_atr, sl_sr)
+        tp1_atr = round(entry - (atr * 2.0), 5)
+        tp2_atr = round(entry - (atr * 3.5), 5)
+        tp3_atr = round(entry - (atr * 5.0), 5)
+        if supports:
+            s1  = round(supports[0] * 1.0001, 5)
+            tp1 = max(tp1_atr, s1) if s1 < entry else tp1_atr
+        else:
+            tp1 = tp1_atr
+        tp2 = tp2_atr
+        tp3 = tp3_atr
+        tp1 = min(tp1, round(entry * 0.9999, 5))
+        tp2 = min(tp2, round(tp1  * 0.9998, 5))
+        tp3 = min(tp3, round(tp2  * 0.9998, 5))
+        sl  = max(sl,  round(entry * 1.0050, 5))
+
+    sl_pct  = abs((sl  - entry) / entry * 100)
     tp1_pct = abs((tp1 - entry) / entry * 100)
     tp2_pct = abs((tp2 - entry) / entry * 100)
+    tp3_pct = abs((tp3 - entry) / entry * 100)
     rr_ratio = round(tp1_pct / sl_pct, 2) if sl_pct > 0 else 0
 
-    modal_leveraged = modal_usd * leverage
-    pip_value = atr * 10
-    profit_tp1 = round(tp1_pct / 100 * modal_leveraged, 2)
-    profit_tp2 = round(tp2_pct / 100 * modal_leveraged, 2)
-    loss_sl = round(sl_pct / 100 * modal_leveraged, 2)
+    # Pip calculation (5-digit broker: 1 pip = 0.00010)
+    pip_size  = 0.00010
+    sl_pips   = round(abs(sl  - entry) / pip_size, 1)
+    tp1_pips  = round(abs(tp1 - entry) / pip_size, 1)
+    tp2_pips  = round(abs(tp2 - entry) / pip_size, 1)
+    tp3_pips  = round(abs(tp3 - entry) / pip_size, 1)
+
+    # Lot size: modal / (100000 * entry), capped agar realistis
+    lot_size    = round(modal_usd / (entry * 1000), 4)
+    profit_tp1  = round(tp1_pips * lot_size * 1.0, 2)
+    profit_tp2  = round(tp2_pips * lot_size * 1.0, 2)
+    profit_tp3  = round(tp3_pips * lot_size * 1.0, 2)
+    loss_sl     = round(sl_pips  * lot_size * 1.0, 2)
 
     return {
-        "signal": signal, "entry": entry, "sl": sl,
-        "tp1": tp1, "tp2": tp2,
-        "sl_pct": round(sl_pct, 4), "tp1_pct": round(tp1_pct, 4), "tp2_pct": round(tp2_pct, 4),
-        "rr_ratio": rr_ratio, "modal": modal_usd, "leverage": leverage,
-        "profit_tp1": profit_tp1, "profit_tp2": profit_tp2, "loss_sl": loss_sl,
-        "atr": round(atr, 5),
+        "signal":     signal,
+        "entry":      entry,
+        "sl":         sl,
+        "tp1":        tp1,
+        "tp2":        tp2,
+        "tp3":        tp3,
+        "sl_pct":     round(sl_pct,  4),
+        "tp1_pct":    round(tp1_pct, 4),
+        "tp2_pct":    round(tp2_pct, 4),
+        "tp3_pct":    round(tp3_pct, 4),
+        "sl_pips":    sl_pips,
+        "tp1_pips":   tp1_pips,
+        "tp2_pips":   tp2_pips,
+        "tp3_pips":   tp3_pips,
+        "rr_ratio":   rr_ratio,
+        "lot_size":   lot_size,
+        "modal":      modal_usd,
+        "leverage":   leverage,
+        "profit_tp1": profit_tp1,
+        "profit_tp2": profit_tp2,
+        "profit_tp3": profit_tp3,
+        "loss_sl":    loss_sl,
+        "atr":        round(atr, 5),
     }
 
 # ─────────────────────────────────────────────
@@ -847,9 +898,10 @@ with tab1:
                     <p style="color:#8b949e; font-size:11px; text-transform:uppercase; letter-spacing:1px; margin:0 0 12px 0;">Entry & Exit</p>
                     <div class="tp-row"><span class="tp-label">Action</span><span class="tp-value" style="color:{action_color};">{action_emoji} {plan["signal"]}</span></div>
                     <div class="tp-row"><span class="tp-label">Entry</span><span class="tp-value tp-yellow">{plan["entry"]:.5f}</span></div>
-                    <div class="tp-row"><span class="tp-label">Stop Loss</span><span class="tp-value tp-red">{plan["sl"]:.5f} (-{plan["sl_pct"]}%)</span></div>
-                    <div class="tp-row"><span class="tp-label">TP 1</span><span class="tp-value tp-green">{plan["tp1"]:.5f} (+{plan["tp1_pct"]}%)</span></div>
-                    <div class="tp-row"><span class="tp-label">TP 2</span><span class="tp-value tp-green">{plan["tp2"]:.5f} (+{plan["tp2_pct"]}%)</span></div>
+                    <div class="tp-row"><span class="tp-label">Stop Loss</span><span class="tp-value tp-red">{plan["sl"]:.5f} ({plan["sl_pips"]} pips)</span></div>
+                    <div class="tp-row"><span class="tp-label">TP 1</span><span class="tp-value tp-green">{plan["tp1"]:.5f} ({plan["tp1_pips"]} pips)</span></div>
+                    <div class="tp-row"><span class="tp-label">TP 2</span><span class="tp-value tp-green">{plan["tp2"]:.5f} ({plan["tp2_pips"]} pips)</span></div>
+                    <div class="tp-row"><span class="tp-label">TP 3</span><span class="tp-value tp-green">{plan["tp3"]:.5f} ({plan["tp3_pips"]} pips)</span></div>
                 </div>
                 """, unsafe_allow_html=True)
             with col_p2:
@@ -859,6 +911,7 @@ with tab1:
                     <div class="tp-row"><span class="tp-label">R/R Ratio</span><span class="tp-value" style="color:{rr_color};">1 : {plan["rr_ratio"]}</span></div>
                     <div class="tp-row"><span class="tp-label">ATR</span><span class="tp-value">{plan["atr"]:.5f}</span></div>
                     <div class="tp-row"><span class="tp-label">Modal</span><span class="tp-value">${plan["modal"]:,.2f}</span></div>
+                    <div class="tp-row"><span class="tp-label">Lot Size</span><span class="tp-value">{plan["lot_size"]}</span></div>
                     <div class="tp-row"><span class="tp-label">Leverage</span><span class="tp-value">1:{plan["leverage"]}</span></div>
                 </div>
                 """, unsafe_allow_html=True)
@@ -868,6 +921,7 @@ with tab1:
                     <p style="color:#8b949e; font-size:11px; text-transform:uppercase; letter-spacing:1px; margin:0 0 12px 0;">Estimasi P&L</p>
                     <div class="tp-row"><span class="tp-label">Profit TP1</span><span class="tp-value tp-green">+${plan["profit_tp1"]}</span></div>
                     <div class="tp-row"><span class="tp-label">Profit TP2</span><span class="tp-value tp-green">+${plan["profit_tp2"]}</span></div>
+                    <div class="tp-row"><span class="tp-label">Profit TP3</span><span class="tp-value tp-green">+${plan["profit_tp3"]}</span></div>
                     <div class="tp-row"><span class="tp-label">Max Loss</span><span class="tp-value tp-red">-${plan["loss_sl"]}</span></div>
                     <div class="tp-row"><span class="tp-label">Worth it?</span><span class="tp-value" style="color:{rr_color};">{"✅ YES" if plan["rr_ratio"] >= 1.5 else "⚠️ MARGINAL" if plan["rr_ratio"] >= 1 else "❌ NO"}</span></div>
                 </div>
@@ -981,7 +1035,7 @@ with tab4:
             💰 Balance: <span style="color:#3fb950;">${account.balance:,.2f} {account.currency}</span><br>
             📊 Leverage: <span style="color:#e6edf3;">1:{account.leverage}</span><br>
             🔗 Status: <span style="color:#3fb950;">🟢 Connected</span><br>
-            Ⓥ Version: <span style="color:#e6edf3;">v2.3.7a (Secure)</span><br>
+            Ⓥ Version: <span style="color:#e6edf3;">v2.3.8 (Secure)</span><br>
             </p>
         </div>
         """, unsafe_allow_html=True)
