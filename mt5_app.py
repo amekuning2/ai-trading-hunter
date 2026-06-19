@@ -516,6 +516,61 @@ def calculate_trade_decision(signal, score_detail, df, supports, resistances):
 # ─────────────────────────────────────────────
 #  MULTI TIMEFRAME
 # ─────────────────────────────────────────────
+# ─────────────────────────────────────────────
+#  REAL MTF SCORE ENGINE
+#  Fetch 1H / 4H / 1D → score per TF → total 0-15
+#  Bobot: 1D=7, 4H=5, 1H=3
+# ─────────────────────────────────────────────
+def calculate_mtf_score(symbol, current_tf):
+    """
+    Hitung MTF score berdasarkan EMA trend alignment di 3 timeframe.
+    current_tf dikecualikan supaya tidak double-count.
+    Returns: int 0-15
+    """
+    tf_config = [
+        ("1h",  "1H", 3),
+        ("4h",  "4H", 5),
+        ("1d",  "1D", 7),
+    ]
+    total_weight = 0
+    total_score  = 0
+
+    for interval, label, weight in tf_config:
+        if label == current_tf:
+            continue
+
+        df_tf = get_mt5_klines(symbol, interval, 200)
+        if df_tf is None or len(df_tf) < 50:
+            continue
+
+        close_tf  = df_tf["close"]
+        ema20_tf  = ta.trend.EMAIndicator(close_tf, window=20).ema_indicator().iloc[-1]
+        ema50_tf  = ta.trend.EMAIndicator(close_tf, window=50).ema_indicator().iloc[-1]
+        ema200_tf = ta.trend.EMAIndicator(close_tf, window=200).ema_indicator().iloc[-1] \
+                    if len(close_tf) >= 200 else ema50_tf
+        price_tf  = close_tf.iloc[-1]
+
+        if ema20_tf > ema50_tf > ema200_tf and price_tf > ema50_tf:
+            tf_score = 1.0
+        elif ema20_tf < ema50_tf < ema200_tf and price_tf < ema50_tf:
+            tf_score = 0.0
+        elif ema20_tf > ema50_tf and price_tf > ema50_tf:
+            tf_score = 0.75
+        elif ema20_tf < ema50_tf and price_tf < ema50_tf:
+            tf_score = 0.25
+        else:
+            tf_score = 0.5
+
+        total_score  += tf_score * weight
+        total_weight += weight
+
+    if total_weight == 0:
+        return 7
+
+    normalized = (total_score / total_weight) * 15
+    return round(normalized)
+
+
 def multi_timeframe_analysis(symbol):
     timeframes = [("1H", "1h", 100), ("4H", "4h", 100), ("1D", "1d", 200)]
     results = []
@@ -784,7 +839,14 @@ with tab1:
     with col_signal:
         st.markdown('<p class="section-header">AI Signal</p>', unsafe_allow_html=True)
         if df is not None:
-            signal, reason, signals, indicators, confidence, score_detail = calculate_signal(df)
+            # Map interval_val ke label TF untuk exclude dari MTF scoring
+            tf_label_map = {"1m":"1M","5m":"5M","15m":"15M","1h":"1H","4h":"4H","1d":"1D"}
+            current_tf_label = tf_label_map.get(interval_val, "1H")
+
+            # Hitung MTF score real dari TF lain (1H/4H/1D)
+            mtf_real = calculate_mtf_score(symbol, current_tf_label)
+
+            signal, reason, signals, indicators, confidence, score_detail = calculate_signal(df, mtf_score_override=mtf_real)
             decision, decision_reason, decision_color = calculate_trade_decision(
                 signal, score_detail, df, supports, resistances
             )
@@ -1035,7 +1097,7 @@ with tab4:
             💰 Balance: <span style="color:#3fb950;">${account.balance:,.2f} {account.currency}</span><br>
             📊 Leverage: <span style="color:#e6edf3;">1:{account.leverage}</span><br>
             🔗 Status: <span style="color:#3fb950;">🟢 Connected</span><br>
-            Ⓥ Version: <span style="color:#e6edf3;">v2.3.8 (Secure)</span><br>
+            Ⓥ Version: <span style="color:#e6edf3;">v2.3.9 (Secure)</span><br>
             </p>
         </div>
         """, unsafe_allow_html=True)
