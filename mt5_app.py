@@ -700,6 +700,87 @@ def generate_trading_plan(df, current_price, signal, supports, resistances, moda
     }
 
 # ─────────────────────────────────────────────
+#  AI REASONING ENGINE — Phase 4A.6
+#  Mengubah score_detail + decision jadi narasi penjelasan
+#  Input  : signal, decision, decision_reason, score_detail, indicators, supports, resistances
+#  Output : (points: list[str], conclusion: str, conclusion_color: str)
+# ─────────────────────────────────────────────
+def generate_ai_reasoning(signal, decision, decision_reason, score_detail, indicators, supports, resistances):
+    if signal == "HOLD":
+        points = [
+            "Tidak ada bias arah yang cukup jelas dari kombinasi Trend, Momentum, dan Structure saat ini.",
+            "Total score belum cukup tinggi maupun cukup rendah untuk memicu sinyal BUY atau SELL.",
+        ]
+        conclusion = "Kesimpulan: Market belum menunjukkan arah yang jelas. Lebih baik tunggu konfirmasi candle berikutnya."
+        return points, conclusion, "#388bfd"
+
+    is_buy = signal == "BUY"
+    direction_word = "bullish" if is_buy else "bearish"
+
+    def strength_label(pct):
+        if pct >= 80: return "sangat kuat"
+        if pct >= 60: return "kuat"
+        if pct >= 45: return "cukup mendukung"
+        if pct >= 25: return "masih lemah"
+        return "berlawanan arah dengan sinyal"
+
+    def cat_pct(score, max_score):
+        raw_pct = (score / max_score * 100) if max_score else 0
+        # Score tinggi = bullish, score rendah = bearish (sesuai desain Signal Engine v2)
+        return raw_pct if is_buy else (100 - raw_pct)
+
+    trend_pct     = cat_pct(score_detail["trend"],     score_detail["trend_max"])
+    momentum_pct  = cat_pct(score_detail["momentum"],  score_detail["momentum_max"])
+    structure_pct = cat_pct(score_detail["structure"], score_detail["structure_max"])
+    mtf_pct       = cat_pct(score_detail["mtf"],       score_detail["mtf_max"])
+    volume_score  = score_detail["volume"]
+
+    points = []
+
+    # Trend
+    ema_note = "EMA20/EMA50/EMA200 align mendukung arah ini" if trend_pct >= 60 else "EMA belum sepenuhnya align"
+    points.append(f"Trend {direction_word} {strength_label(trend_pct)} — {ema_note}.")
+
+    # Momentum
+    rsi_val = indicators.get("RSI", "-")
+    macd_note = "MACD searah dengan sinyal" if momentum_pct >= 60 else "MACD belum konfirmasi penuh"
+    points.append(f"Momentum {strength_label(momentum_pct)} — RSI di level {rsi_val}, {macd_note}.")
+
+    # Structure
+    sr_note = "harga berada di zona Support/Resistance yang ideal" if structure_pct >= 60 else "harga belum berada di zona S/R yang ideal"
+    points.append(f"Struktur harga {strength_label(structure_pct)} — {sr_note}.")
+
+    # MTF
+    if mtf_pct >= 70:
+        mtf_text = "Multi-timeframe (1H/4H/1D) searah penuh, jadi konfirmasi cukup kuat."
+    elif mtf_pct >= 45:
+        mtf_text = "Multi-timeframe sebagian searah, masih ada timeframe yang belum konfirmasi."
+    else:
+        mtf_text = "Multi-timeframe belum align — ada risiko pergerakan choppy/whipsaw."
+    points.append(mtf_text)
+
+    # Volume
+    if volume_score >= 4:
+        points.append("Volume sedang surge, menandakan minat pasar yang kuat di balik pergerakan ini.")
+    elif volume_score >= 2:
+        points.append("Volume dalam kondisi normal, tidak ada lonjakan minat pasar yang signifikan.")
+    else:
+        points.append("Volume tergolong lemah — waspada potensi pergerakan palsu (false move).")
+
+    # Conclusion
+    if decision == "ENTER":
+        conclusion = f"Kesimpulan: Setup layak untuk {signal} sekarang. {decision_reason}."
+        color = "#3fb950"
+    elif decision == "WAIT":
+        conclusion = f"Kesimpulan: Ada potensi {signal}, tapi belum ideal untuk masuk sekarang. {decision_reason}."
+        color = "#f0883e"
+    else:
+        conclusion = f"Kesimpulan: Tidak disarankan masuk saat ini. {decision_reason}."
+        color = "#f85149"
+
+    return points, conclusion, color
+
+# ─────────────────────────────────────────────
 #  CHART
 # ─────────────────────────────────────────────
 def build_chart(df, symbol, resistances=[], supports=[]):
@@ -996,6 +1077,31 @@ with tab1:
         else:
             st.info("⏳ Sinyal HOLD — Tunggu sinyal BUY/SELL yang lebih jelas.")
 
+    # ── AI Reasoning — Phase 4A.6 ──────────────
+    if df is not None:
+        reasoning_points, reasoning_conclusion, reasoning_color = generate_ai_reasoning(
+            signal, decision, decision_reason, score_detail, indicators, supports, resistances
+        )
+
+        st.markdown("---")
+        st.markdown('<p class="section-header">🧠 AI Reasoning</p>', unsafe_allow_html=True)
+
+        points_html = "".join([
+            f'<li style="color:#c9d1d9; font-size:13px; margin-bottom:6px; line-height:1.6;">{p}</li>'
+            for p in reasoning_points
+        ])
+
+        st.markdown(f"""
+        <div style="background:#161b22; border:1px solid #30363d; border-left:4px solid {reasoning_color}; border-radius:8px; padding:18px;">
+            <ul style="margin:0 0 12px 0; padding-left:18px;">
+                {points_html}
+            </ul>
+            <p style="color:{reasoning_color}; font-size:14px; font-weight:700; margin:0; padding-top:10px; border-top:1px solid #21262d;">
+                {reasoning_conclusion}
+            </p>
+        </div>
+        """, unsafe_allow_html=True)
+
 # ─── TAB 2: MULTI TIMEFRAME ───
 with tab2:
     st.markdown('<p class="section-header">🕐 Multi-Timeframe Analysis</p>', unsafe_allow_html=True)
@@ -1289,7 +1395,7 @@ with tab5:
             💰 Balance: <span style="color:#3fb950;">${account.balance:,.2f} {account.currency}</span><br>
             📊 Leverage: <span style="color:#e6edf3;">1:{account.leverage}</span><br>
             🔗 Status: <span style="color:#3fb950;">🟢 Connected</span><br>
-            Ⓥ Version: <span style="color:#e6edf3;">v2.3.9b (Secure)</span><br>
+            Ⓥ Version: <span style="color:#e6edf3;">v2.4 (AI Reasoning)</span><br>
             </p>
         </div>
         """, unsafe_allow_html=True)

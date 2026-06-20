@@ -1,0 +1,508 @@
+# AI TRADING HUNTER ROADMAP
+
+## Version: v2.4.0
+
+## Last Updated: June 2026
+
+---
+
+# PROJECT GOAL
+
+Membangun Trading Intelligence Platform untuk:
+
+* Binance (Crypto)
+* MT5 (Forex & Gold)
+
+Fokus:
+
+* High Probability Setup
+* Intraday Trading
+* Signal Quality
+* Risk Management
+* Decision Support
+
+Bukan:
+
+* Auto Trading
+* HFT
+* Martingale
+* Jackpot Trading
+
+---
+
+# COMPLETED PHASES
+
+## Infrastructure
+
+Status: ✅ DONE
+
+### Completed
+
+* GCP Windows Server Setup
+* Python Environment
+* Streamlit Deployment
+* Binance API Integration
+* MT5 Integration
+* GitHub Deployment Workflow
+* Task Scheduler Auto Start
+* Dashboard Auto Recovery
+* Reboot Test Success
+
+---
+
+## Phase 4A.1 — Signal Engine v2
+
+Status: ✅ DONE
+
+### Completed
+
+5 Category Weighted Scoring
+
+* Trend = 35
+* Momentum = 25
+* Structure = 20
+* MTF = 15
+* Volume = 5
+
+Total Score = 100
+
+Output:
+
+* Signal
+* Confidence
+* Indicators
+* Score Breakdown
+
+---
+
+## Phase 4A.2 — Trade Decision Engine
+
+Status: ✅ DONE
+
+### Completed
+
+Decision Layer:
+
+* ENTER
+* WAIT
+* SKIP
+
+Logic:
+
+* Score Filter
+* RR Filter
+* Trend Filter
+* Momentum Filter
+* Support/Resistance Filter
+
+---
+
+## Phase 4A.3 — TP/SL Engine
+
+Status: ✅ DONE
+
+### Completed
+
+Trading Plan:
+
+* Entry
+* Stop Loss
+* TP1
+* TP2
+* TP3
+
+RR Calculation
+
+ATR Based Position Planning
+
+Estimated P&L
+
+---
+
+## Phase 4A.4 — Real Multi Timeframe
+
+Status: ✅ DONE
+
+### Completed
+
+MTF Analysis:
+
+* 1H
+* 4H
+* 1D
+
+Real Data Fetch
+
+MTF Consensus
+
+MTF Scoring
+
+---
+
+## Phase 4A.5 — Backtesting Engine
+
+Status: ✅ DONE
+
+### Completed
+
+Historical Signal Replay
+
+Metrics:
+
+* Total Trade
+* Win Rate
+* Total Profit/Loss
+* Average RR
+* Average Score
+
+Trade History Table
+
+---
+
+# CURRENT OBSERVATION
+
+Backtesting menunjukkan:
+
+* Engine sudah memiliki positive edge
+* Win Rate bukan fokus utama
+* RR dan consistency lebih penting
+* Engine cenderung lebih selektif daripada agresif
+* Masalah utama bukan lagi kekurangan indikator
+* Masalah utama adalah cara menyampaikan keputusan ke user
+
+---
+
+# ACTIVE ROADMAP
+
+## Priority #1
+
+### Phase 4A.6 — AI Reasoning Engine
+
+Status: 📌 NEXT
+
+Goal:
+
+Menjelaskan alasan setiap keputusan AI.
+
+Output Baru:
+
+* Reasoning
+* Decision Explanation
+* Confidence Explanation
+
+---
+
+Contoh:
+
+BUY
+
+Trend bullish kuat.
+
+Momentum mendukung.
+
+MTF searah.
+
+Harga masih memiliki ruang menuju resistance.
+
+Kesimpulan:
+
+Setup memenuhi syarat entry.
+
+---
+
+Untuk WAIT:
+
+Trend bullish.
+
+Momentum melemah.
+
+Harga dekat resistance.
+
+Tunggu pullback atau breakout.
+
+---
+
+Untuk SKIP:
+
+Trend tidak jelas.
+
+RR buruk.
+
+MTF bertentangan.
+
+Tidak ada setup berkualitas.
+
+---
+
+Benefit:
+
+* Mengurangi FOMO
+* Meningkatkan trust
+* Membuat AI lebih mudah dipahami
+* Meniru cara analis profesional menjelaskan setup
+
+---
+
+## Priority #2
+
+### Phase 4A.7 — UX Dashboard Optimization
+
+Status: 📌 NEXT
+
+Goal:
+
+Meningkatkan usability dashboard.
+
+---
+
+Problem Saat Ini
+
+Trading Plan terlalu jauh di bawah.
+
+User harus scroll panjang.
+
+---
+
+Layout Baru
+
+Chart + AI Signal
+
+↓
+
+Trading Plan
+
+↓
+
+AI Reasoning
+
+↓
+
+Support Resistance
+
+↓
+
+Indicators
+
+↓
+
+Raw Values
+
+---
+
+Catatan
+
+Gunakan area kosong di bawah chart.
+
+Jangan memaksa seluruh panel masuk ke kolom kanan.
+
+Berlaku untuk:
+
+* trading_app.py
+* mt5_app.py
+
+---
+
+Benefit:
+
+* Lebih cepat dibaca
+* Mengurangi scrolling
+* Fokus ke informasi penting
+
+---
+
+## Priority #3
+
+### Phase 4A.8 — Score Analytics Engine
+
+Status: 📌 NEXT
+
+Goal:
+
+Menganalisa performa berdasarkan score.
+
+---
+
+Kategori:
+
+* Score 50-59
+* Score 60-69
+* Score 70-79
+* Score 80+
+
+---
+
+Output:
+
+* Win Rate per Score
+* Profit per Score
+* RR per Score
+
+---
+
+Benefit:
+
+Menentukan threshold optimal:
+
+* ENTER
+* WAIT
+* SKIP
+
+Berdasarkan data nyata.
+
+Bukan asumsi.
+
+---
+
+## Priority #4
+
+### Phase 4A.9 — Risk Management Panel
+
+Status: 📌 NEXT
+
+Goal:
+
+Position sizing berdasarkan risiko.
+
+---
+
+Input:
+
+* Modal
+* Risk %
+
+---
+
+Output:
+
+* Max Loss
+* Recommended Position Size
+* Lot Size
+* Capital Exposure
+
+---
+
+Contoh
+
+Modal:
+
+100 USD
+
+Risk:
+
+2%
+
+Output:
+
+Max Loss = 2 USD
+
+Position Size otomatis
+
+---
+
+Benefit:
+
+Salah satu fitur paling berpengaruh terhadap profit jangka panjang.
+
+---
+
+## Priority #5
+
+### Phase 4A.10 — Entry Quality Rating
+
+Status: 📌 SAVED
+
+Goal:
+
+Memberikan rating kualitas setup.
+
+---
+
+Output:
+
+* A+
+* A
+* B
+* C
+* D
+
+---
+
+Contoh
+
+BUY
+
+Confidence: 78%
+
+Entry Quality: A
+
+Reason:
+
+Trend kuat
+
+MTF searah
+
+RR tinggi
+
+---
+
+Benefit:
+
+User lebih cepat memahami kualitas setup.
+
+---
+
+## Priority #6
+
+### Telegram Notification
+
+Status: 📌 SAVED
+
+Goal:
+
+Mengirim notifikasi setup potensial.
+
+---
+
+## Priority #7
+
+### Binance Futures Module
+
+Status: 📌 SAVED
+
+Goal:
+
+Mendukung Futures Analysis.
+
+Tidak termasuk Auto Trading.
+
+---
+
+# LONG TERM VISION
+
+Current State:
+
+Signal Generator + Dashboard
+
+Target State:
+
+Trading Intelligence Assistant
+
+Output Ideal:
+
+Signal
++
+Confidence
++
+Entry / SL / TP
++
+AI Reasoning
++
+Entry Quality
++
+Risk Management
++
+Backtesting Analytics
+
+Tujuan Akhir:
+
+Membantu user mengambil keputusan trading yang lebih konsisten dan terukur, bukan sekadar memberikan sinyal BUY atau SELL.
