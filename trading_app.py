@@ -1420,7 +1420,7 @@ with tab5:
             💰 Balance: <span style="color:#3fb950;">${account.balance:,.2f} {account.currency}</span><br>
             📊 Leverage: <span style="color:#e6edf3;">1:{account.leverage}</span><br>
             🔗 Status: <span style="color:#3fb950;">🟢 Connected</span><br>
-            Ⓥ Version: <span style="color:#e6edf3;">v2.4.3 (AI Reasoning)</span><br>
+            Ⓥ Version: <span style="color:#e6edf3;">v2.4.3b (AI Reasoning)</span><br>
             </p>
         </div>
         """, unsafe_allow_html=True)
