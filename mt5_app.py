@@ -352,24 +352,35 @@ def calculate_signal(df, mtf_score_override=None):
     # ── TOTAL ──────────────────────────────────
     total_score = trend_score + momentum_score + structure_score + mtf_score + volume_score
     weighted_bias = (trend_bias * 35) + (momentum_bias * 25) + (structure_bias * 20)
-    confidence = total_score
-
     # ── SIGNAL DECISION ────────────────────────
     if weighted_bias > 0 and total_score >= 60:
         signal = "BUY"
-        reason = f"High probability BUY — Score {total_score}/100"
     elif weighted_bias < 0 and total_score <= 45:
         signal = "SELL"
-        reason = f"High probability SELL — Score {total_score}/100"
     elif weighted_bias > 0 and total_score >= 50:
         signal = "BUY"
-        reason = f"Moderate BUY setup — Score {total_score}/100"
     elif weighted_bias < 0 and total_score <= 50:
         signal = "SELL"
-        reason = f"Moderate SELL setup — Score {total_score}/100"
     else:
         signal = "HOLD"
-        reason = f"Market belum jelas — Score {total_score}/100, tunggu konfirmasi"
+
+    # Score mentah memakai skala bullish (tinggi = BUY, rendah = SELL).
+    # Ubah menjadi kekuatan searah bias agar BUY dan SELL dinilai simetris.
+    if signal == "BUY":
+        confidence = total_score
+    elif signal == "SELL":
+        confidence = (
+            (35 - trend_score) + (25 - momentum_score) +
+            (20 - structure_score) + (15 - mtf_score) + volume_score
+        )
+    else:
+        confidence = 50
+
+    if signal == "HOLD":
+        reason = "Market Bias: NETRAL — tunggu arah yang lebih jelas"
+    else:
+        strength = "STRONG" if confidence >= 75 else "MODERATE" if confidence >= 60 else "WEAK"
+        reason = f"Market Bias: {signal} — {strength} ({confidence}/100)"
 
     # ── BADGES (kompatibel UI lama) ─────────────
     signals = {}
@@ -423,6 +434,7 @@ def calculate_signal(df, mtf_score_override=None):
         "volume":         volume_score,
         "volume_max":     5,
         "total":          total_score,
+        "confidence":     confidence,
         "bias":           signal,
     }
 
@@ -442,11 +454,12 @@ def calculate_trade_decision(signal, score_detail, df, supports, resistances):
     if signal == "HOLD":
         return "SKIP", "Sinyal HOLD — tidak ada setup", "#8b949e"
 
-    total       = score_detail["total"]
-    trend       = score_detail["trend"]
-    momentum    = score_detail["momentum"]
-    structure   = score_detail["structure"]
-    mtf         = score_detail["mtf"]
+    is_buy      = signal == "BUY"
+    total       = score_detail.get("confidence", score_detail["total"])
+    trend       = score_detail["trend"] if is_buy else score_detail["trend_max"] - score_detail["trend"]
+    momentum    = score_detail["momentum"] if is_buy else score_detail["momentum_max"] - score_detail["momentum"]
+    structure   = score_detail["structure"] if is_buy else score_detail["structure_max"] - score_detail["structure"]
+    mtf         = score_detail["mtf"] if is_buy else score_detail["mtf_max"] - score_detail["mtf"]
 
     # ── ATR & RR check ─────────────────────────
     try:
@@ -980,11 +993,12 @@ with tab1:
             st.markdown("<br>", unsafe_allow_html=True)
             st.markdown('<p class="section-header">Score Breakdown</p>', unsafe_allow_html=True)
 
+            score_direction = 1 if signal != "SELL" else -1
             score_rows = [
-                ("Trend",     score_detail["trend"],     score_detail["trend_max"],     "#388bfd"),
-                ("Momentum",  score_detail["momentum"],  score_detail["momentum_max"],  "#d2a8ff"),
-                ("Structure", score_detail["structure"], score_detail["structure_max"], "#f0883e"),
-                ("MTF",       score_detail["mtf"],       score_detail["mtf_max"],       "#79c0ff"),
+                ("Trend",     score_detail["trend"] if score_direction > 0 else score_detail["trend_max"] - score_detail["trend"],             score_detail["trend_max"],     "#388bfd"),
+                ("Momentum",  score_detail["momentum"] if score_direction > 0 else score_detail["momentum_max"] - score_detail["momentum"], score_detail["momentum_max"],  "#d2a8ff"),
+                ("Structure", score_detail["structure"] if score_direction > 0 else score_detail["structure_max"] - score_detail["structure"], score_detail["structure_max"], "#f0883e"),
+                ("MTF",       score_detail["mtf"] if score_direction > 0 else score_detail["mtf_max"] - score_detail["mtf"],                 score_detail["mtf_max"],       "#79c0ff"),
                 ("Volume",    score_detail["volume"],    score_detail["volume_max"],    "#56d364"),
             ]
             for label_s, val, max_val, bar_color in score_rows:
@@ -1004,7 +1018,7 @@ with tab1:
             st.markdown(f"""
             <div style="display:flex; justify-content:space-between; padding:6px 0; border-top:1px solid #30363d; margin-top:4px;">
                 <span style="color:#e6edf3; font-size:12px; font-weight:700;">TOTAL</span>
-                <span style="color:{strength_color}; font-size:14px; font-weight:800;">{score_detail["total"]}/100</span>
+                <span style="color:{strength_color}; font-size:14px; font-weight:800;">{confidence}/100</span>
             </div>
             """, unsafe_allow_html=True)
 
@@ -1039,7 +1053,7 @@ with tab1:
         with col_m2:
             leverage = st.selectbox("⚡ Leverage", [1, 10, 50, 100, 200, 500], index=3)
     
-        if df is not None:
+        if df is not None and decision == "ENTER":
             plan = generate_trading_plan(df, bid, signal, supports, resistances, modal_usd=modal, leverage=leverage)
     
             if plan:
@@ -1084,6 +1098,8 @@ with tab1:
                     """, unsafe_allow_html=True)
             else:
                 st.info("⏳ Sinyal HOLD — Tunggu sinyal BUY/SELL yang lebih jelas.")
+        elif df is not None:
+            st.warning(f"Trading Plan dikunci — keputusan AI: {decision}. {decision_reason}")
     
     # AI Reasoning — rendered in the right column below AI Signal
     if df is not None:
@@ -1404,7 +1420,7 @@ with tab5:
             💰 Balance: <span style="color:#3fb950;">${account.balance:,.2f} {account.currency}</span><br>
             📊 Leverage: <span style="color:#e6edf3;">1:{account.leverage}</span><br>
             🔗 Status: <span style="color:#3fb950;">🟢 Connected</span><br>
-            Ⓥ Version: <span style="color:#e6edf3;">v2.4 (AI Reasoning)</span><br>
+            Ⓥ Version: <span style="color:#e6edf3;">v2.4.2 (AI Reasoning)</span><br>
             </p>
         </div>
         """, unsafe_allow_html=True)
