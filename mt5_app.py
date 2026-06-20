@@ -654,15 +654,20 @@ def generate_trading_plan(df, current_price, signal, supports, resistances, moda
     tp3_pct = abs((tp3 - entry) / entry * 100)
     rr_ratio = round(tp1_pct / sl_pct, 2) if sl_pct > 0 else 0
 
-    # Pip calculation (5-digit broker: 1 pip = 0.00010)
-    pip_size  = 0.00010
+    # Auto-detect pip size & lot size berdasarkan harga
+    # Forex (< 100): pip = 0.00010, lot dari 100k unit
+    # Gold/Indices (>= 100): pip = 0.10, lot dari 10 unit
+    if entry >= 100:
+        pip_size = 0.10
+        lot_size = round(modal_usd / (entry * 10), 4)
+    else:
+        pip_size = 0.00010
+        lot_size = round(modal_usd / (entry * 1000), 4)
+
     sl_pips   = round(abs(sl  - entry) / pip_size, 1)
     tp1_pips  = round(abs(tp1 - entry) / pip_size, 1)
     tp2_pips  = round(abs(tp2 - entry) / pip_size, 1)
     tp3_pips  = round(abs(tp3 - entry) / pip_size, 1)
-
-    # Lot size: modal / (100000 * entry), capped agar realistis
-    lot_size    = round(modal_usd / (entry * 1000), 4)
     profit_tp1  = round(tp1_pips * lot_size * 1.0, 2)
     profit_tp2  = round(tp2_pips * lot_size * 1.0, 2)
     profit_tp3  = round(tp3_pips * lot_size * 1.0, 2)
@@ -1148,11 +1153,26 @@ with tab4:
                 if outcome == "OPEN":
                     continue
 
-                # Pip-based P&L untuk forex
-                pip_size = 0.00010
+                # Auto-detect pip size berdasarkan harga
+                # Forex (EURUSD dll): harga < 100 → pip = 0.00010
+                # Gold (XAUUSD):      harga > 100 → pip = 0.10
+                # Indices/Oil:        fallback ke persentase
+                if entry_price < 10:
+                    pip_size  = 0.00010   # JPY pairs & crypto-like
+                elif entry_price < 100:
+                    pip_size  = 0.00010   # Forex majors
+                else:
+                    pip_size  = 0.10      # Gold, Silver, Indices
+
                 sl_pips  = abs(entry_price - sl_bt) / pip_size
                 tp_pips  = abs(tp1_bt - entry_price) / pip_size
-                lot_size = round(bt_modal / (entry_price * 1000), 4)
+
+                # Lot size: untuk gold, 1 lot = 100 oz, mini lot = 10 oz
+                # Estimasi lot dari modal: modal / (entry * 10) untuk gold
+                if entry_price > 100:
+                    lot_size = round(bt_modal / (entry_price * 10), 4)
+                else:
+                    lot_size = round(bt_modal / (entry_price * 1000), 4)
 
                 if outcome == "WIN":
                     pnl = round(tp_pips * lot_size, 2)
