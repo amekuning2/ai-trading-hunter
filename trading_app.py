@@ -1113,6 +1113,9 @@ with tab1:
         else:
             st.error("Gagal load chart data")
 
+        # Filled after signal calculation, but rendered directly below the chart.
+        trading_plan_container = st.container()
+
     with col_signal:
         st.markdown('<p class="section-header">AI Signal</p>', unsafe_allow_html=True)
 
@@ -1163,6 +1166,10 @@ with tab1:
                 </div>
             </div>
             """, unsafe_allow_html=True)
+
+            # Filled after the analysis blocks are prepared, but rendered here so
+            # the explanation stays directly below the signal card.
+            reasoning_container = st.container()
 
             # ── Score Breakdown ──────────────────
             st.markdown("<br>", unsafe_allow_html=True)
@@ -1227,145 +1234,147 @@ with tab1:
             for s in supports:
                 st.markdown(f'<div class="sr-level sr-support"><span style="color:#8b949e;">Support</span><span style="color:#3fb950; font-weight:700;">${s:,.4f}</span></div>', unsafe_allow_html=True)
 
-    # Trading Plan section — full width below chart+signal
-    st.markdown("---")
-    st.markdown('<p class="section-header">📋 Trading Plan</p>', unsafe_allow_html=True)
+    # Trading Plan — rendered in the left column below Price Chart
+    with trading_plan_container:
+        st.markdown("---")
+        st.markdown('<p class="section-header">📋 Trading Plan</p>', unsafe_allow_html=True)
 
-    modal = st.number_input("💵 Modal (USDT)", min_value=1.0, value=100.0, step=10.0, format="%.2f")
-
+        modal = st.number_input("💵 Modal (USDT)", min_value=1.0, value=100.0, step=10.0, format="%.2f")
+    
+        if df is not None and price_data is not None:
+            plan = generate_trading_plan(df, price_data, signal, supports, resistances, modal_usdt=modal)
+    
+            if plan:
+                rr_color = "#3fb950" if plan["rr_ratio"] >= 1.5 else "#f0883e" if plan["rr_ratio"] >= 1 else "#f85149"
+                action_color = "#3fb950" if plan["signal"] == "BUY" else "#f85149"
+                action_emoji = "🟢" if plan["signal"] == "BUY" else "🔴"
+    
+                col_p1, col_p2, col_p3 = st.columns(3)
+    
+                with col_p1:
+                    st.markdown(f"""
+                    <div class="tp-card">
+                        <p style="color:#8b949e; font-size:11px; text-transform:uppercase; letter-spacing:1px; margin:0 0 12px 0;">Entry & Exit</p>
+                        <div class="tp-row">
+                            <span class="tp-label">Action</span>
+                            <span class="tp-value" style="color:{action_color};">{action_emoji} {plan["signal"]}</span>
+                        </div>
+                        <div class="tp-row">
+                            <span class="tp-label">Entry Price</span>
+                            <span class="tp-value tp-yellow">${plan["entry"]:,.4f}</span>
+                        </div>
+                        <div class="tp-row">
+                            <span class="tp-label">Stop Loss</span>
+                            <span class="tp-value tp-red">${plan["sl"]:,.4f} (-{plan["sl_pct"]}%)</span>
+                        </div>
+                        <div class="tp-row">
+                            <span class="tp-label">TP 1</span>
+                            <span class="tp-value tp-green">${plan["tp1"]:,.4f} (+{plan["tp1_pct"]}%)</span>
+                        </div>
+                        <div class="tp-row">
+                            <span class="tp-label">TP 2</span>
+                            <span class="tp-value tp-green">${plan["tp2"]:,.4f} (+{plan["tp2_pct"]}%)</span>
+                        </div>
+                        <div class="tp-row">
+                            <span class="tp-label">TP 3</span>
+                            <span class="tp-value tp-green">${plan["tp3"]:,.4f} (+{plan["tp3_pct"]}%)</span>
+                        </div>
+                    </div>
+                    """, unsafe_allow_html=True)
+    
+                with col_p2:
+                    st.markdown(f"""
+                    <div class="tp-card">
+                        <p style="color:#8b949e; font-size:11px; text-transform:uppercase; letter-spacing:1px; margin:0 0 12px 0;">Risk & Reward</p>
+                        <div class="tp-row">
+                            <span class="tp-label">R/R Ratio</span>
+                            <span class="tp-value" style="color:{rr_color};">1 : {plan["rr_ratio"]}</span>
+                        </div>
+                        <div class="tp-row">
+                            <span class="tp-label">ATR</span>
+                            <span class="tp-value">${plan["atr"]:,.4f}</span>
+                        </div>
+                        <div class="tp-row">
+                            <span class="tp-label">Modal</span>
+                            <span class="tp-value">${plan["modal"]:,.2f} USDT</span>
+                        </div>
+                        <div class="tp-row">
+                            <span class="tp-label">Qty</span>
+                            <span class="tp-value">{plan["qty"]} {symbol.replace("USDT","")}</span>
+                        </div>
+                    </div>
+                    """, unsafe_allow_html=True)
+    
+                with col_p3:
+                    st.markdown(f"""
+                    <div class="tp-card">
+                        <p style="color:#8b949e; font-size:11px; text-transform:uppercase; letter-spacing:1px; margin:0 0 12px 0;">Estimasi P&L</p>
+                        <div class="tp-row">
+                            <span class="tp-label">Profit TP1</span>
+                            <span class="tp-value tp-green">+${plan["profit_tp1"]}</span>
+                        </div>
+                        <div class="tp-row">
+                            <span class="tp-label">Profit TP2</span>
+                            <span class="tp-value tp-green">+${plan["profit_tp2"]}</span>
+                        </div>
+                        <div class="tp-row">
+                            <span class="tp-label">Profit TP3</span>
+                            <span class="tp-value tp-green">+${plan["profit_tp3"]}</span>
+                        </div>
+                        <div class="tp-row">
+                            <span class="tp-label">Max Loss</span>
+                            <span class="tp-value tp-red">-${plan["loss_sl"]}</span>
+                        </div>
+                        <div class="tp-row">
+                            <span class="tp-label">Worth it?</span>
+                            <span class="tp-value" style="color:{rr_color};">{"✅ YES" if plan["rr_ratio"] >= 1.5 else "⚠️ MARGINAL" if plan["rr_ratio"] >= 1 else "❌ NO"}</span>
+                        </div>
+                    </div>
+                    """, unsafe_allow_html=True)
+    
+                st.markdown(f"""
+                <div style="background:#161b22; border:1px solid #30363d; border-radius:8px; padding:12px; margin-top:8px;">
+                    <p style="color:#8b949e; font-size:12px; margin:0;">
+                    💡 <strong style="color:#e6edf3;">Cara pakai:</strong>
+                    Entry di <strong style="color:#f0883e;">${plan["entry"]:,.4f}</strong> →
+                    Pasang SL di <strong style="color:#f85149;">${plan["sl"]:,.4f}</strong> →
+                    Take profit sebagian di TP1 <strong style="color:#3fb950;">${plan["tp1"]:,.4f}</strong>,
+                    sisanya di TP2 <strong style="color:#3fb950;">${plan["tp2"]:,.4f}</strong>.
+                    R/R ratio <strong style="color:{rr_color};">1:{plan["rr_ratio"]}</strong>
+                    {"— trade ini worth it! ✅" if plan["rr_ratio"] >= 1.5 else "— pertimbangkan ulang ⚠️" if plan["rr_ratio"] >= 1 else "— skip trade ini ❌"}
+                    </p>
+                </div>
+                """, unsafe_allow_html=True)
+    
+            else:
+                st.info("⏳ Sinyal HOLD — Trading plan tidak tersedia. Tunggu sinyal BUY/SELL yang lebih jelas.")
+    
+    # AI Reasoning — rendered in the right column below AI Signal
     if df is not None and price_data is not None:
-        plan = generate_trading_plan(df, price_data, signal, supports, resistances, modal_usdt=modal)
-
-        if plan:
-            rr_color = "#3fb950" if plan["rr_ratio"] >= 1.5 else "#f0883e" if plan["rr_ratio"] >= 1 else "#f85149"
-            action_color = "#3fb950" if plan["signal"] == "BUY" else "#f85149"
-            action_emoji = "🟢" if plan["signal"] == "BUY" else "🔴"
-
-            col_p1, col_p2, col_p3 = st.columns(3)
-
-            with col_p1:
-                st.markdown(f"""
-                <div class="tp-card">
-                    <p style="color:#8b949e; font-size:11px; text-transform:uppercase; letter-spacing:1px; margin:0 0 12px 0;">Entry & Exit</p>
-                    <div class="tp-row">
-                        <span class="tp-label">Action</span>
-                        <span class="tp-value" style="color:{action_color};">{action_emoji} {plan["signal"]}</span>
-                    </div>
-                    <div class="tp-row">
-                        <span class="tp-label">Entry Price</span>
-                        <span class="tp-value tp-yellow">${plan["entry"]:,.4f}</span>
-                    </div>
-                    <div class="tp-row">
-                        <span class="tp-label">Stop Loss</span>
-                        <span class="tp-value tp-red">${plan["sl"]:,.4f} (-{plan["sl_pct"]}%)</span>
-                    </div>
-                    <div class="tp-row">
-                        <span class="tp-label">TP 1</span>
-                        <span class="tp-value tp-green">${plan["tp1"]:,.4f} (+{plan["tp1_pct"]}%)</span>
-                    </div>
-                    <div class="tp-row">
-                        <span class="tp-label">TP 2</span>
-                        <span class="tp-value tp-green">${plan["tp2"]:,.4f} (+{plan["tp2_pct"]}%)</span>
-                    </div>
-                    <div class="tp-row">
-                        <span class="tp-label">TP 3</span>
-                        <span class="tp-value tp-green">${plan["tp3"]:,.4f} (+{plan["tp3_pct"]}%)</span>
-                    </div>
-                </div>
-                """, unsafe_allow_html=True)
-
-            with col_p2:
-                st.markdown(f"""
-                <div class="tp-card">
-                    <p style="color:#8b949e; font-size:11px; text-transform:uppercase; letter-spacing:1px; margin:0 0 12px 0;">Risk & Reward</p>
-                    <div class="tp-row">
-                        <span class="tp-label">R/R Ratio</span>
-                        <span class="tp-value" style="color:{rr_color};">1 : {plan["rr_ratio"]}</span>
-                    </div>
-                    <div class="tp-row">
-                        <span class="tp-label">ATR</span>
-                        <span class="tp-value">${plan["atr"]:,.4f}</span>
-                    </div>
-                    <div class="tp-row">
-                        <span class="tp-label">Modal</span>
-                        <span class="tp-value">${plan["modal"]:,.2f} USDT</span>
-                    </div>
-                    <div class="tp-row">
-                        <span class="tp-label">Qty</span>
-                        <span class="tp-value">{plan["qty"]} {symbol.replace("USDT","")}</span>
-                    </div>
-                </div>
-                """, unsafe_allow_html=True)
-
-            with col_p3:
-                st.markdown(f"""
-                <div class="tp-card">
-                    <p style="color:#8b949e; font-size:11px; text-transform:uppercase; letter-spacing:1px; margin:0 0 12px 0;">Estimasi P&L</p>
-                    <div class="tp-row">
-                        <span class="tp-label">Profit TP1</span>
-                        <span class="tp-value tp-green">+${plan["profit_tp1"]}</span>
-                    </div>
-                    <div class="tp-row">
-                        <span class="tp-label">Profit TP2</span>
-                        <span class="tp-value tp-green">+${plan["profit_tp2"]}</span>
-                    </div>
-                    <div class="tp-row">
-                        <span class="tp-label">Profit TP3</span>
-                        <span class="tp-value tp-green">+${plan["profit_tp3"]}</span>
-                    </div>
-                    <div class="tp-row">
-                        <span class="tp-label">Max Loss</span>
-                        <span class="tp-value tp-red">-${plan["loss_sl"]}</span>
-                    </div>
-                    <div class="tp-row">
-                        <span class="tp-label">Worth it?</span>
-                        <span class="tp-value" style="color:{rr_color};">{"✅ YES" if plan["rr_ratio"] >= 1.5 else "⚠️ MARGINAL" if plan["rr_ratio"] >= 1 else "❌ NO"}</span>
-                    </div>
-                </div>
-                """, unsafe_allow_html=True)
-
+        with reasoning_container:
+            reasoning_points, reasoning_conclusion, reasoning_color = generate_ai_reasoning(
+                signal, decision, decision_reason, score_detail, indicators, supports, resistances
+            )
+    
+            st.markdown("---")
+            st.markdown('<p class="section-header">🧠 AI Reasoning</p>', unsafe_allow_html=True)
+    
+            points_html = "".join([
+                f'<li style="color:#c9d1d9; font-size:13px; margin-bottom:6px; line-height:1.6;">{p}</li>'
+                for p in reasoning_points
+            ])
+    
             st.markdown(f"""
-            <div style="background:#161b22; border:1px solid #30363d; border-radius:8px; padding:12px; margin-top:8px;">
-                <p style="color:#8b949e; font-size:12px; margin:0;">
-                💡 <strong style="color:#e6edf3;">Cara pakai:</strong>
-                Entry di <strong style="color:#f0883e;">${plan["entry"]:,.4f}</strong> →
-                Pasang SL di <strong style="color:#f85149;">${plan["sl"]:,.4f}</strong> →
-                Take profit sebagian di TP1 <strong style="color:#3fb950;">${plan["tp1"]:,.4f}</strong>,
-                sisanya di TP2 <strong style="color:#3fb950;">${plan["tp2"]:,.4f}</strong>.
-                R/R ratio <strong style="color:{rr_color};">1:{plan["rr_ratio"]}</strong>
-                {"— trade ini worth it! ✅" if plan["rr_ratio"] >= 1.5 else "— pertimbangkan ulang ⚠️" if plan["rr_ratio"] >= 1 else "— skip trade ini ❌"}
+            <div style="background:#161b22; border:1px solid #30363d; border-left:4px solid {reasoning_color}; border-radius:8px; padding:18px;">
+                <ul style="margin:0 0 12px 0; padding-left:18px;">
+                    {points_html}
+                </ul>
+                <p style="color:{reasoning_color}; font-size:14px; font-weight:700; margin:0; padding-top:10px; border-top:1px solid #21262d;">
+                    {reasoning_conclusion}
                 </p>
             </div>
             """, unsafe_allow_html=True)
-
-        else:
-            st.info("⏳ Sinyal HOLD — Trading plan tidak tersedia. Tunggu sinyal BUY/SELL yang lebih jelas.")
-
-    # ── AI Reasoning — Phase 4A.6 ──────────────
-    if df is not None and price_data is not None:
-        reasoning_points, reasoning_conclusion, reasoning_color = generate_ai_reasoning(
-            signal, decision, decision_reason, score_detail, indicators, supports, resistances
-        )
-
-        st.markdown("---")
-        st.markdown('<p class="section-header">🧠 AI Reasoning</p>', unsafe_allow_html=True)
-
-        points_html = "".join([
-            f'<li style="color:#c9d1d9; font-size:13px; margin-bottom:6px; line-height:1.6;">{p}</li>'
-            for p in reasoning_points
-        ])
-
-        st.markdown(f"""
-        <div style="background:#161b22; border:1px solid #30363d; border-left:4px solid {reasoning_color}; border-radius:8px; padding:18px;">
-            <ul style="margin:0 0 12px 0; padding-left:18px;">
-                {points_html}
-            </ul>
-            <p style="color:{reasoning_color}; font-size:14px; font-weight:700; margin:0; padding-top:10px; border-top:1px solid #21262d;">
-                {reasoning_conclusion}
-            </p>
-        </div>
-        """, unsafe_allow_html=True)
-
+    
 # ─── TAB 2: MULTI TIMEFRAME ───
 with tab2:
     st.markdown('<p class="section-header">🕐 Multi-Timeframe Analysis</p>', unsafe_allow_html=True)
