@@ -2,8 +2,7 @@ import streamlit as st
 import pandas as pd
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
-from binance.client import Client
-from binance.exceptions import BinanceAPIException
+import MetaTrader5 as mt5
 import ta
 import time
 from datetime import datetime
@@ -12,8 +11,8 @@ from datetime import datetime
 #  CONFIG
 # ─────────────────────────────────────────────
 st.set_page_config(
-    page_title="AI Trading Dashboard",
-    page_icon="📈",
+    page_title="MT5 Forex Dashboard",
+    page_icon="📊",
     layout="wide",
     initial_sidebar_state="collapsed"
 )
@@ -23,14 +22,9 @@ st.set_page_config(
 # ─────────────────────────────────────────────
 st.markdown("""
 <style>
-    /* Base dark theme */
     .stApp { background-color: #0d1117; color: #e6edf3; }
     .stSidebar { background-color: #161b22; border-right: 1px solid #30363d; }
-    .stSidebar .stSelectbox label,
-    .stSidebar .stRadio label,
-    .stSidebar p { color: #8b949e !important; font-size: 12px; text-transform: uppercase; letter-spacing: 1px; }
 
-    /* Metric cards */
     [data-testid="metric-container"] {
         background: #161b22;
         border: 1px solid #30363d;
@@ -38,217 +32,132 @@ st.markdown("""
         padding: 16px;
     }
     [data-testid="metric-container"] label { color: #8b949e !important; font-size: 11px; text-transform: uppercase; letter-spacing: 1px; }
-    [data-testid="metric-container"] [data-testid="stMetricValue"] { color: #e6edf3; font-size: 24px; font-weight: 700; }
-    [data-testid="metric-container"] [data-testid="stMetricDelta"] { font-size: 13px; }
+    [data-testid="metric-container"] [data-testid="stMetricValue"] { color: #e6edf3; font-size: 22px; font-weight: 700; }
 
-    /* Signal box */
-    .signal-buy {
-        background: linear-gradient(135deg, #0d2b1d, #0f3d2a);
-        border: 1px solid #2ea043;
-        border-left: 4px solid #2ea043;
-        border-radius: 8px;
-        padding: 20px;
-        text-align: center;
-    }
-    .signal-sell {
-        background: linear-gradient(135deg, #2d1b1b, #3d1f1f);
-        border: 1px solid #f85149;
-        border-left: 4px solid #f85149;
-        border-radius: 8px;
-        padding: 20px;
-        text-align: center;
-    }
-    .signal-hold {
-        background: linear-gradient(135deg, #1b1f2d, #1e2540);
-        border: 1px solid #388bfd;
-        border-left: 4px solid #388bfd;
-        border-radius: 8px;
-        padding: 20px;
-        text-align: center;
-    }
-    .signal-text { font-size: 32px; font-weight: 800; margin: 0; letter-spacing: 2px; }
+    .signal-buy { background: linear-gradient(135deg, #0d2b1d, #0f3d2a); border: 1px solid #2ea043; border-left: 4px solid #2ea043; border-radius: 8px; padding: 20px; text-align: center; }
+    .signal-sell { background: linear-gradient(135deg, #2d1b1b, #3d1f1f); border: 1px solid #f85149; border-left: 4px solid #f85149; border-radius: 8px; padding: 20px; text-align: center; }
+    .signal-hold { background: linear-gradient(135deg, #1b1f2d, #1e2540); border: 1px solid #388bfd; border-left: 4px solid #388bfd; border-radius: 8px; padding: 20px; text-align: center; }
+    .signal-text { font-size: 28px; font-weight: 800; margin: 0; letter-spacing: 2px; }
     .signal-buy .signal-text { color: #3fb950; }
     .signal-sell .signal-text { color: #f85149; }
     .signal-hold .signal-text { color: #388bfd; }
-    .signal-reason { color: #8b949e; font-size: 13px; margin-top: 8px; }
+    .signal-reason { color: #8b949e; font-size: 12px; margin-top: 8px; }
 
-    /* Indicator badges */
-    .badge {
-        display: inline-block;
-        padding: 4px 12px;
-        border-radius: 20px;
-        font-size: 12px;
-        font-weight: 600;
-        margin: 3px;
-    }
+    .badge { display: inline-block; padding: 3px 10px; border-radius: 20px; font-size: 11px; font-weight: 600; margin: 2px; }
     .badge-green { background: #0d2b1d; color: #3fb950; border: 1px solid #2ea043; }
     .badge-red { background: #2d1b1b; color: #f85149; border: 1px solid #f85149; }
     .badge-neutral { background: #1b1f2d; color: #8b949e; border: 1px solid #30363d; }
 
-    /* Section headers */
-    .section-header {
-        color: #8b949e;
-        font-size: 11px;
-        text-transform: uppercase;
-        letter-spacing: 2px;
-        border-bottom: 1px solid #30363d;
-        padding-bottom: 8px;
-        margin-bottom: 16px;
-    }
+    .section-header { color: #8b949e; font-size: 11px; text-transform: uppercase; letter-spacing: 2px; border-bottom: 1px solid #30363d; padding-bottom: 8px; margin-bottom: 16px; }
 
-    /* Gainers table */
-    .gainer-row {
-        display: flex;
-        justify-content: space-between;
-        padding: 8px 12px;
-        border-radius: 6px;
-        margin: 4px 0;
-        background: #161b22;
-        border: 1px solid #30363d;
-    }
+    .pair-card { background: #161b22; border: 1px solid #30363d; border-radius: 8px; padding: 12px; margin: 4px 0; display: flex; justify-content: space-between; align-items: center; }
 
-    /* Hide streamlit branding */
-    #MainMenu { visibility: hidden; }
-    footer { visibility: hidden; }
-    header { visibility: hidden; }
-
-    /* Plotly chart background */
-    .js-plotly-plot { border-radius: 8px; }
-
-    /* MTF Cards */
-    .mtf-card {
-        background: #161b22;
-        border: 1px solid #30363d;
-        border-radius: 8px;
-        padding: 12px;
-        text-align: center;
-        margin: 4px 0;
-    }
+    .mtf-card { background: #161b22; border: 1px solid #30363d; border-radius: 8px; padding: 12px; text-align: center; margin: 4px 0; }
     .mtf-buy { border-left: 3px solid #3fb950; }
     .mtf-sell { border-left: 3px solid #f85149; }
     .mtf-hold { border-left: 3px solid #388bfd; }
 
-    /* Strength bar */
-    .strength-bar-container {
-        background: #21262d;
-        border-radius: 20px;
-        height: 8px;
-        margin: 8px 0;
-        overflow: hidden;
-    }
-    .strength-bar-fill {
-        height: 100%;
-        border-radius: 20px;
-    }
+    .strength-bar-container { background: #21262d; border-radius: 20px; height: 8px; margin: 8px 0; overflow: hidden; }
+    .strength-bar-fill { height: 100%; border-radius: 20px; }
 
-    /* Support Resistance */
     .sr-level { display: flex; justify-content: space-between; padding: 6px 10px; border-radius: 6px; margin: 3px 0; font-size: 12px; }
     .sr-resistance { background: #2d1b1b; border-left: 3px solid #f85149; }
     .sr-support { background: #0d2b1d; border-left: 3px solid #3fb950; }
 
-    /* Trading Plan */
-    .tp-card {
-        background: #161b22;
-        border: 1px solid #30363d;
-        border-radius: 10px;
-        padding: 16px;
-        margin: 8px 0;
-    }
-    .tp-row {
-        display: flex;
-        justify-content: space-between;
-        padding: 6px 0;
-        border-bottom: 1px solid #21262d;
-        font-size: 13px;
-    }
+    .tp-card { background: #161b22; border: 1px solid #30363d; border-radius: 10px; padding: 16px; margin: 8px 0; }
+    .tp-row { display: flex; justify-content: space-between; padding: 6px 0; border-bottom: 1px solid #21262d; font-size: 13px; }
     .tp-row:last-child { border-bottom: none; }
     .tp-label { color: #8b949e; }
     .tp-value { color: #e6edf3; font-weight: 600; }
     .tp-green { color: #3fb950 !important; }
     .tp-red { color: #f85149 !important; }
     .tp-yellow { color: #f0883e !important; }
+
+    #MainMenu { visibility: hidden; }
+    footer { visibility: hidden; }
+    header { visibility: hidden; }
 </style>
 """, unsafe_allow_html=True)
 
 # ─────────────────────────────────────────────
-#  LOAD API CREDENTIALS FROM ENVIRONMENT
-# ─────────────────────────────────────────────
-try:
-    BINANCE_API_KEY = st.secrets["BINANCE_API_KEY"]
-    BINANCE_API_SECRET = st.secrets["BINANCE_API_SECRET"]
-except Exception as e:
-    st.error(f"Secrets error: {e}")
-    st.stop()
-
-# Validate credentials
-if not BINANCE_API_KEY or not BINANCE_API_SECRET:
-    st.error("❌ Binance API credentials not found!")
-    st.info("""
-    Please setup your `.env` file with:
-    ```
-    BINANCE_API_KEY=your_key_here
-    BINANCE_API_SECRET=your_secret_here
-    ```
-    """)
-    st.stop()
-
-# ─────────────────────────────────────────────
-#  BINANCE CLIENT
+#  MT5 CONNECTION
 # ─────────────────────────────────────────────
 @st.cache_resource
-def get_client(BINANCE_API_KEY, BINANCE_API_SECRET):
-    return Client(BINANCE_API_KEY, BINANCE_API_SECRET)
+def init_mt5():
+    if not mt5.initialize():
+        return False
+    return True
 
 # ─────────────────────────────────────────────
 #  DATA FUNCTIONS
 # ─────────────────────────────────────────────
+TIMEFRAME_MAP = {
+    "1m": mt5.TIMEFRAME_M1,
+    "5m": mt5.TIMEFRAME_M5,
+    "15m": mt5.TIMEFRAME_M15,
+    "1h": mt5.TIMEFRAME_H1,
+    "4h": mt5.TIMEFRAME_H4,
+    "1d": mt5.TIMEFRAME_D1,
+}
+
 @st.cache_data(ttl=30)
-def get_price(symbol, BINANCE_API_KEY, BINANCE_API_SECRET):
+def get_mt5_price(symbol):
     try:
-        client = get_client(BINANCE_API_KEY, BINANCE_API_SECRET)
-        ticker = client.get_ticker(symbol=symbol)
-
+        mt5.symbol_select(symbol, True)
+        tick = mt5.symbol_info_tick(symbol)
+        info = mt5.symbol_info(symbol)
+        if tick is None or info is None:
+            return None
+        if tick.bid == 0.0 and tick.ask == 0.0:
+            return None
         return {
-            "price": float(ticker["lastPrice"]),
-            "change": float(ticker["priceChangePercent"]),
-            "high": float(ticker["highPrice"]),
-            "low": float(ticker["lowPrice"]),
-            "volume": float(ticker["volume"]),
-            "quoteVolume": float(ticker["quoteVolume"]),
+            "bid": tick.bid,
+            "ask": tick.ask,
+            "spread": round((tick.ask - tick.bid) / info.point * info.trade_tick_size / info.point, 1),
+            "digits": info.digits,
         }
-    
-    except Exception as e:
-        st.error(f"BINANCE ERROR: {type(e).__name__}")
-        st.error(str(e))
-        raise
-
-@st.cache_data(ttl=60)
-def get_klines(symbol, interval, limit, BINANCE_API_KEY, BINANCE_API_SECRET):
-    try:
-        client = get_client(BINANCE_API_KEY, BINANCE_API_SECRET)
-        klines = client.get_klines(symbol=symbol, interval=interval, limit=limit)
-        df = pd.DataFrame(klines, columns=[
-            "timestamp","open","high","low","close","volume",
-            "close_time","quote_volume","trades","taker_buy_base",
-            "taker_buy_quote","ignore"
-        ])
-        df["timestamp"] = pd.to_datetime(df["timestamp"], unit="ms")
-        for col in ["open","high","low","close","volume"]:
-            df[col] = df[col].astype(float)
-        return df
-    except Exception as e:
+    except:
         return None
 
 @st.cache_data(ttl=60)
-def get_top_gainers(BINANCE_API_KEY, BINANCE_API_SECRET, n=10):
+def get_mt5_klines(symbol, timeframe_str, limit):
     try:
-        client = get_client(BINANCE_API_KEY, BINANCE_API_SECRET)
-        tickers = client.get_ticker()
-        usdt_pairs = [t for t in tickers if t["symbol"].endswith("USDT") and float(t["quoteVolume"]) > 1_000_000]
-        sorted_gainers = sorted(usdt_pairs, key=lambda x: float(x["priceChangePercent"]), reverse=True)
-        return sorted_gainers[:n]
+        mt5.symbol_select(symbol, True)
+        tf = TIMEFRAME_MAP.get(timeframe_str, mt5.TIMEFRAME_H1)
+        rates = mt5.copy_rates_from_pos(symbol, tf, 0, limit)
+        if rates is None:
+            return None
+        df = pd.DataFrame(rates)
+        df["time"] = pd.to_datetime(df["time"], unit="s")
+        df = df.rename(columns={"time": "timestamp", "tick_volume": "volume"})
+        for col in ["open", "high", "low", "close", "volume"]:
+            df[col] = df[col].astype(float)
+        return df
     except:
-        return []
+        return None
+
+@st.cache_data(ttl=60)
+def get_all_prices(pairs):
+    result = []
+    for symbol in pairs:
+        tick = mt5.symbol_info_tick(symbol)
+        info = mt5.symbol_info(symbol)
+        if tick and info:
+            rates = mt5.copy_rates_from_pos(symbol, mt5.TIMEFRAME_D1, 0, 2)
+            if rates is not None and len(rates) >= 2:
+                prev_close = rates[-2]["close"]
+                curr_price = tick.bid
+                change_pct = round((curr_price - prev_close) / prev_close * 100, 4)
+            else:
+                change_pct = 0
+            result.append({
+                "symbol": symbol,
+                "bid": tick.bid,
+                "ask": tick.ask,
+                "change": change_pct,
+                "digits": info.digits,
+            })
+    return result
 
 # ─────────────────────────────────────────────
 #  AI SIGNAL ENGINE v2 — SCORING ENGINE
@@ -304,58 +213,45 @@ def calculate_signal(df, mtf_score_override=None):
     bb         = ta.volatility.BollingerBands(close, window=20)
     bb_upper   = bb.bollinger_hband().iloc[-1]
     bb_lower   = bb.bollinger_lband().iloc[-1]
-    bb_mid     = bb.bollinger_mavg().iloc[-1]
-    bb_pos     = (current_price - bb_lower) / max(bb_upper - bb_lower, 0.0001) * 100
+    bb_pos     = (current_price - bb_lower) / max(bb_upper - bb_lower, 0.0000001) * 100
 
     avg_vol    = volume.rolling(20).mean().iloc[-1]
     curr_vol   = volume.iloc[-1]
-    vol_ratio  = curr_vol / max(avg_vol, 0.0001)
+    vol_ratio  = curr_vol / max(avg_vol, 0.0000001)
 
-    # Support & Resistance sederhana untuk Structure
     highs = high.rolling(10).max()
     lows  = low.rolling(10).min()
     nearest_resistance = highs.iloc[-1]
     nearest_support    = lows.iloc[-1]
-    dist_to_resistance = (nearest_resistance - current_price) / max(current_price, 0.0001) * 100
-    dist_to_support    = (current_price - nearest_support)    / max(current_price, 0.0001) * 100
+    dist_to_resistance = (nearest_resistance - current_price) / max(current_price, 0.0000001) * 100
+    dist_to_support    = (current_price - nearest_support)    / max(current_price, 0.0000001) * 100
 
     # ── 1. TREND SCORE (0-35) ──────────────────
     trend_score = 0
-    trend_bias  = 0  # +1 bullish, -1 bearish
+    trend_bias  = 0
 
-    # EMA alignment (max 20)
     if ema20_val > ema50_val > ema200_val:
-        trend_score += 20
-        trend_bias  += 1
+        trend_score += 20; trend_bias += 1
     elif ema20_val < ema50_val < ema200_val:
-        trend_score += 0
-        trend_bias  -= 1
+        trend_score += 0;  trend_bias -= 1
     elif ema20_val > ema50_val:
-        trend_score += 12
-        trend_bias  += 1
+        trend_score += 12; trend_bias += 1
     elif ema20_val < ema50_val:
-        trend_score += 5
-        trend_bias  -= 1
+        trend_score += 5;  trend_bias -= 1
     else:
         trend_score += 8
 
-    # Price vs EMA50 (max 10)
     if current_price > ema50_val:
-        trend_score += 10
-        trend_bias  += 1
+        trend_score += 10; trend_bias += 1
     elif current_price < ema50_val:
-        trend_score += 0
-        trend_bias  -= 1
+        trend_score += 0;  trend_bias -= 1
     else:
         trend_score += 5
 
-    # Price vs EMA200 (max 5)
     if current_price > ema200_val:
-        trend_score += 5
-        trend_bias  += 1
+        trend_score += 5; trend_bias += 1
     else:
-        trend_score += 0
-        trend_bias  -= 1
+        trend_score += 0; trend_bias -= 1
 
     trend_score = min(trend_score, 35)
 
@@ -363,19 +259,17 @@ def calculate_signal(df, mtf_score_override=None):
     momentum_score = 0
     momentum_bias  = 0
 
-    # RSI (max 10)
     if rsi < 30:
-        momentum_score += 10; momentum_bias += 1   # oversold → reversal buy
+        momentum_score += 10; momentum_bias += 1
     elif rsi < 45:
-        momentum_score += 8;  momentum_bias += 1   # bullish momentum
+        momentum_score += 8;  momentum_bias += 1
     elif rsi > 70:
-        momentum_score += 0;  momentum_bias -= 1   # overbought → reversal sell
+        momentum_score += 0;  momentum_bias -= 1
     elif rsi > 55:
-        momentum_score += 3;  momentum_bias -= 1   # bearish momentum
+        momentum_score += 3;  momentum_bias -= 1
     else:
-        momentum_score += 5                        # neutral
+        momentum_score += 5
 
-    # MACD (max 10)
     if macd_val > macd_sig and macd_hist > 0:
         momentum_score += 10; momentum_bias += 1
     elif macd_val < macd_sig and macd_hist < 0:
@@ -387,11 +281,10 @@ def calculate_signal(df, mtf_score_override=None):
     else:
         momentum_score += 5
 
-    # Stochastic (max 5)
     if stoch_k < 20 and stoch_k > stoch_d:
-        momentum_score += 5;  momentum_bias += 1   # oversold cross
+        momentum_score += 5;  momentum_bias += 1
     elif stoch_k > 80 and stoch_k < stoch_d:
-        momentum_score += 0;  momentum_bias -= 1   # overbought cross
+        momentum_score += 0;  momentum_bias -= 1
     elif stoch_k < 40:
         momentum_score += 3;  momentum_bias += 1
     elif stoch_k > 60:
@@ -405,25 +298,20 @@ def calculate_signal(df, mtf_score_override=None):
     structure_score = 0
     structure_bias  = 0
 
-    # Posisi BB (max 10)
     if bb_pos < 20:
-        structure_score += 10; structure_bias += 1  # dekat lower band → buy zone
+        structure_score += 10; structure_bias += 1
     elif bb_pos > 80:
-        structure_score += 0;  structure_bias -= 1  # dekat upper band → sell zone
+        structure_score += 0;  structure_bias -= 1
     elif bb_pos < 40:
         structure_score += 7;  structure_bias += 1
     elif bb_pos > 60:
         structure_score += 3;  structure_bias -= 1
     else:
-        structure_score += 5                        # mid BB
+        structure_score += 5
 
-    # Jarak ke Support vs Resistance (max 10)
-    # Makin dekat ke support dan jauh dari resistance → lebih bagus buat buy
     if dist_to_support < dist_to_resistance:
-        # Harga lebih dekat support → potensi buy
         structure_score += 8; structure_bias += 1
     elif dist_to_resistance < dist_to_support:
-        # Harga lebih dekat resistance → potensi sell
         structure_score += 2; structure_bias -= 1
     else:
         structure_score += 5
@@ -431,16 +319,13 @@ def calculate_signal(df, mtf_score_override=None):
     structure_score = min(structure_score, 20)
 
     # ── 4. MTF SCORE (0-15) ────────────────────
-    # Jika ada override dari luar (recursive call), pakai itu
-    # Kalau tidak, estimasi dari 4H dan 1D sederhana
     if mtf_score_override is not None:
         mtf_score = max(0, min(mtf_score_override, 15))
     else:
-        # Estimasi MTF dari EMA slope pendekatan sederhana
         ema20_series = ema20.dropna()
         if len(ema20_series) >= 10:
-            slope_short = ema20_series.iloc[-1] - ema20_series.iloc[-5]   # 5 candle slope
-            slope_long  = ema20_series.iloc[-1] - ema20_series.iloc[-10]  # 10 candle slope
+            slope_short = ema20_series.iloc[-1] - ema20_series.iloc[-5]
+            slope_long  = ema20_series.iloc[-1] - ema20_series.iloc[-10]
             if slope_short > 0 and slope_long > 0:
                 mtf_score = 12
             elif slope_short > 0 or slope_long > 0:
@@ -450,29 +335,23 @@ def calculate_signal(df, mtf_score_override=None):
             else:
                 mtf_score = 6
         else:
-            mtf_score = 7  # neutral fallback
+            mtf_score = 7
 
     # ── 5. VOLUME SCORE (0-5) ──────────────────
-    volume_score = 0
     if vol_ratio >= 2.0:
-        volume_score = 5   # surge kuat
+        volume_score = 5
     elif vol_ratio >= 1.5:
-        volume_score = 4   # surge moderat
+        volume_score = 4
     elif vol_ratio >= 1.0:
-        volume_score = 3   # di atas rata-rata
+        volume_score = 3
     elif vol_ratio >= 0.7:
         volume_score = 2
     else:
-        volume_score = 1   # volume lemah
+        volume_score = 1
 
-    # ── TOTAL SCORE ────────────────────────────
+    # ── TOTAL ──────────────────────────────────
     total_score = trend_score + momentum_score + structure_score + mtf_score + volume_score
-    # total max = 100
-
-    # ── BIAS FINAL ─────────────────────────────
-    # Gabungkan bias dari semua kategori (terbobot)
     weighted_bias = (trend_bias * 35) + (momentum_bias * 25) + (structure_bias * 20)
-
     # ── SIGNAL DECISION ────────────────────────
     if weighted_bias > 0 and total_score >= 60:
         signal = "BUY"
@@ -506,57 +385,31 @@ def calculate_signal(df, mtf_score_override=None):
     # ── BADGES (kompatibel UI lama) ─────────────
     signals = {}
 
-    # RSI badge
-    if rsi < 30:
-        signals["RSI"] = ("OVERSOLD", "green")
-    elif rsi < 45:
-        signals["RSI"] = ("BULLISH", "green")
-    elif rsi > 70:
-        signals["RSI"] = ("OVERBOUGHT", "red")
-    elif rsi > 55:
-        signals["RSI"] = ("BEARISH", "red")
-    else:
-        signals["RSI"] = ("NEUTRAL", "neutral")
+    if rsi < 30:   signals["RSI"] = ("OVERSOLD", "green")
+    elif rsi < 45: signals["RSI"] = ("BULLISH", "green")
+    elif rsi > 70: signals["RSI"] = ("OVERBOUGHT", "red")
+    elif rsi > 55: signals["RSI"] = ("BEARISH", "red")
+    else:          signals["RSI"] = ("NEUTRAL", "neutral")
 
-    # MACD badge
-    if macd_val > macd_sig and macd_hist > 0:
-        signals["MACD"] = ("BULLISH CROSS", "green")
-    elif macd_val < macd_sig and macd_hist < 0:
-        signals["MACD"] = ("BEARISH CROSS", "red")
-    else:
-        signals["MACD"] = ("NEUTRAL", "neutral")
+    if macd_val > macd_sig and macd_hist > 0:   signals["MACD"] = ("BULLISH CROSS", "green")
+    elif macd_val < macd_sig and macd_hist < 0: signals["MACD"] = ("BEARISH CROSS", "red")
+    else:                                        signals["MACD"] = ("NEUTRAL", "neutral")
 
-    # EMA badge
-    if ema20_val > ema50_val > ema200_val:
-        signals["EMA"] = ("STRONG UPTREND", "green")
-    elif ema20_val < ema50_val < ema200_val:
-        signals["EMA"] = ("STRONG DOWNTREND", "red")
-    elif ema20_val > ema50_val:
-        signals["EMA"] = ("UPTREND", "green")
-    else:
-        signals["EMA"] = ("DOWNTREND", "red")
+    if ema20_val > ema50_val > ema200_val:   signals["EMA"] = ("STRONG UPTREND", "green")
+    elif ema20_val < ema50_val < ema200_val: signals["EMA"] = ("STRONG DOWNTREND", "red")
+    elif ema20_val > ema50_val:              signals["EMA"] = ("UPTREND", "green")
+    else:                                    signals["EMA"] = ("DOWNTREND", "red")
 
-    # Stoch badge
-    if stoch_k < 20 and stoch_k > stoch_d:
-        signals["STOCH"] = ("OVERSOLD CROSS", "green")
-    elif stoch_k > 80 and stoch_k < stoch_d:
-        signals["STOCH"] = ("OVERBOUGHT CROSS", "red")
-    else:
-        signals["STOCH"] = ("NEUTRAL", "neutral")
+    if stoch_k < 20 and stoch_k > stoch_d:   signals["STOCH"] = ("OVERSOLD CROSS", "green")
+    elif stoch_k > 80 and stoch_k < stoch_d: signals["STOCH"] = ("OVERBOUGHT CROSS", "red")
+    else:                                     signals["STOCH"] = ("NEUTRAL", "neutral")
 
-    # BB badge
-    if bb_pos < 20:
-        signals["BB"] = ("BELOW LOWER", "green")
-    elif bb_pos > 80:
-        signals["BB"] = ("ABOVE UPPER", "red")
-    else:
-        signals["BB"] = ("WITHIN BAND", "neutral")
+    if bb_pos < 20:   signals["BB"] = ("BELOW LOWER", "green")
+    elif bb_pos > 80: signals["BB"] = ("ABOVE UPPER", "red")
+    else:             signals["BB"] = ("WITHIN BAND", "neutral")
 
-    # Volume badge
-    if vol_ratio >= 1.5:
-        signals["VOL"] = ("SURGE ⚡", "green")
-    else:
-        signals["VOL"] = ("NORMAL", "neutral")
+    if vol_ratio >= 1.5: signals["VOL"] = ("SURGE ⚡", "green")
+    else:                signals["VOL"] = ("NORMAL", "neutral")
 
     # ── RAW VALUES ─────────────────────────────
     indicators = {
@@ -564,12 +417,11 @@ def calculate_signal(df, mtf_score_override=None):
         "MACD": round(macd_val, 6),
         "Stoch %K": round(stoch_k, 2),
         "BB_pos": round(bb_pos, 1),
-        "EMA20": round(ema20_val, 4),
-        "EMA50": round(ema50_val, 4),
-        "EMA200": round(ema200_val, 4),
+        "EMA20": round(ema20_val, 5),
+        "EMA50": round(ema50_val, 5),
+        "EMA200": round(ema200_val, 5),
     }
 
-    # ── SCORE BREAKDOWN ────────────────────────
     score_detail = {
         "trend":          trend_score,
         "trend_max":      35,
@@ -634,12 +486,12 @@ def calculate_trade_decision(signal, score_detail, df, supports, resistances):
     structure_ok = False
     if signal == "BUY" and supports:
         dist_pct = abs(current_price - supports[0]) / current_price * 100
-        structure_ok = dist_pct <= 1.5   # harga dalam 1.5% dari support
+        structure_ok = dist_pct <= 1.5
     elif signal == "SELL" and resistances:
         dist_pct = abs(resistances[0] - current_price) / current_price * 100
-        structure_ok = dist_pct <= 1.5   # harga dalam 1.5% dari resistance
+        structure_ok = dist_pct <= 1.5
     else:
-        structure_ok = structure >= 12   # fallback: structure score cukup
+        structure_ok = structure >= 12
 
     # ── Decision logic ─────────────────────────
     reasons_wait = []
@@ -665,84 +517,78 @@ def calculate_trade_decision(signal, score_detail, df, supports, resistances):
     if not structure_ok:
         reasons_wait.append("belum di zona S/R ideal")
 
-    # ENTER: semua bersih
     if not reasons_wait and total >= 60 and rr_ratio >= 1.5:
         return "ENTER", f"Setup solid — Score {total}/100, RR 1:{rr_ratio:.1f}", "#3fb950"
 
-    # WAIT: ada catatan tapi masih layak dipantau
     if reasons_wait:
-        note = ", ".join(reasons_wait[:2])   # max 2 alasan di UI
+        note = ", ".join(reasons_wait[:2])
         return "WAIT", f"Tunggu: {note}", "#f0883e"
 
-    # Default fallback ENTER jika lolos semua threshold
     return "ENTER", f"Setup cukup — Score {total}/100, RR 1:{rr_ratio:.1f}", "#3fb950"
 
 # ─────────────────────────────────────────────
-#  MULTI TIMEFRAME ANALYSIS
+#  MULTI TIMEFRAME
 # ─────────────────────────────────────────────
 # ─────────────────────────────────────────────
 #  REAL MTF SCORE ENGINE
 #  Fetch 1H / 4H / 1D → score per TF → total 0-15
 #  Bobot: 1D=7, 4H=5, 1H=3
 # ─────────────────────────────────────────────
-def calculate_mtf_score(symbol, current_tf, BINANCE_API_KEY, BINANCE_API_SECRET):
+def calculate_mtf_score(symbol, current_tf):
     """
     Hitung MTF score berdasarkan EMA trend alignment di 3 timeframe.
-    current_tf dikecualikan dari scoring supaya tidak double-count.
+    current_tf dikecualikan supaya tidak double-count.
     Returns: int 0-15
     """
     tf_config = [
-        ("1h",  "1H", 3),   # bobot 3
-        ("4h",  "4H", 5),   # bobot 5
-        ("1d",  "1D", 7),   # bobot 7
+        ("1h",  "1H", 3),
+        ("4h",  "4H", 5),
+        ("1d",  "1D", 7),
     ]
     total_weight = 0
     total_score  = 0
 
     for interval, label, weight in tf_config:
-        # Skip timeframe yang sedang aktif (sudah dihitung di signal utama)
         if label == current_tf:
             continue
 
-        df_tf = get_klines(symbol, interval, 200, BINANCE_API_KEY, BINANCE_API_SECRET)
+        df_tf = get_mt5_klines(symbol, interval, 200)
         if df_tf is None or len(df_tf) < 50:
             continue
 
-        close_tf = df_tf["close"]
-        ema20_tf = ta.trend.EMAIndicator(close_tf, window=20).ema_indicator().iloc[-1]
-        ema50_tf = ta.trend.EMAIndicator(close_tf, window=50).ema_indicator().iloc[-1]
+        close_tf  = df_tf["close"]
+        ema20_tf  = ta.trend.EMAIndicator(close_tf, window=20).ema_indicator().iloc[-1]
+        ema50_tf  = ta.trend.EMAIndicator(close_tf, window=50).ema_indicator().iloc[-1]
         ema200_tf = ta.trend.EMAIndicator(close_tf, window=200).ema_indicator().iloc[-1] \
                     if len(close_tf) >= 200 else ema50_tf
-        price_tf = close_tf.iloc[-1]
+        price_tf  = close_tf.iloc[-1]
 
-        # Scoring per TF: 0.0 sampai 1.0
         if ema20_tf > ema50_tf > ema200_tf and price_tf > ema50_tf:
-            tf_score = 1.0    # full bullish alignment
+            tf_score = 1.0
         elif ema20_tf < ema50_tf < ema200_tf and price_tf < ema50_tf:
-            tf_score = 0.0    # full bearish alignment
+            tf_score = 0.0
         elif ema20_tf > ema50_tf and price_tf > ema50_tf:
-            tf_score = 0.75   # bullish tapi EMA200 belum align
+            tf_score = 0.75
         elif ema20_tf < ema50_tf and price_tf < ema50_tf:
-            tf_score = 0.25   # bearish tapi EMA200 belum align
+            tf_score = 0.25
         else:
-            tf_score = 0.5    # neutral / mixed
+            tf_score = 0.5
 
         total_score  += tf_score * weight
         total_weight += weight
 
     if total_weight == 0:
-        return 7  # fallback neutral
+        return 7
 
-    # Normalize ke 0-15
     normalized = (total_score / total_weight) * 15
     return round(normalized)
 
 
-def multi_timeframe_analysis(symbol, BINANCE_API_KEY, BINANCE_API_SECRET):
+def multi_timeframe_analysis(symbol):
     timeframes = [("1H", "1h", 100), ("4H", "4h", 100), ("1D", "1d", 200)]
     results = []
-    for label, interval, limit in timeframes:
-        df = get_klines(symbol, interval, limit, BINANCE_API_KEY, BINANCE_API_SECRET)
+    for label, tf, limit in timeframes:
+        df = get_mt5_klines(symbol, tf, limit)
         signal, reason, _, _, confidence, score_detail = calculate_signal(df)
         results.append((label, signal, reason, confidence))
     return results
@@ -763,84 +609,82 @@ def get_support_resistance(df, n=3):
             resistance_levels.append(df["high"].iloc[i])
         if df["low"].iloc[i] == lows.iloc[i]:
             support_levels.append(df["low"].iloc[i])
-    resistance_levels = sorted(set([round(r, 4) for r in resistance_levels if r > current_price]))[:n]
-    support_levels = sorted(set([round(s, 4) for s in support_levels if s < current_price]), reverse=True)[:n]
+    resistance_levels = sorted(set([round(r, 5) for r in resistance_levels if r > current_price]))[:n]
+    support_levels = sorted(set([round(s, 5) for s in support_levels if s < current_price]), reverse=True)[:n]
     return resistance_levels, support_levels
 
 # ─────────────────────────────────────────────
-#  TRADING PLAN GENERATOR
+#  TRADING PLAN
 # ─────────────────────────────────────────────
-def generate_trading_plan(df, price_data, signal, supports, resistances, modal_usdt=100):
-    current_price = price_data["price"]
-
-    if df is None or len(df) < 20:
+def generate_trading_plan(df, current_price, signal, supports, resistances, modal_usd=100, leverage=100):
+    if df is None or len(df) < 20 or signal == "HOLD":
         return None
 
-    atr = ta.volatility.AverageTrueRange(df["high"], df["low"], df["close"], window=14).average_true_range().iloc[-1]
+    atr   = ta.volatility.AverageTrueRange(df["high"], df["low"], df["close"], window=14).average_true_range().iloc[-1]
+    entry = round(current_price, 5)
 
     if signal == "BUY":
-        entry = round(current_price, 4)
-        # SL: ATR-based, diperkuat oleh support terdekat
-        sl_atr  = round(entry - (atr * 1.5), 4)
-        sl_sr   = round(supports[0] * 0.998, 4) if supports else sl_atr
-        sl      = min(sl_atr, sl_sr)           # ambil yang lebih jauh (proteksi lebih)
-        # TP: ATR-based, dihalangi resistance
-        tp1_atr = round(entry + (atr * 2.0), 4)
-        tp2_atr = round(entry + (atr * 3.5), 4)
-        tp3_atr = round(entry + (atr * 5.0), 4)
+        sl_atr  = round(entry - (atr * 1.5), 5)
+        sl_sr   = round(supports[0] * 0.9998, 5) if supports else sl_atr
+        sl      = min(sl_atr, sl_sr)
+        tp1_atr = round(entry + (atr * 2.0), 5)
+        tp2_atr = round(entry + (atr * 3.5), 5)
+        tp3_atr = round(entry + (atr * 5.0), 5)
         if resistances:
-            r1 = round(resistances[0] * 0.999, 4)
+            r1  = round(resistances[0] * 0.9999, 5)
             tp1 = min(tp1_atr, r1) if r1 > entry else tp1_atr
         else:
             tp1 = tp1_atr
         tp2 = tp2_atr
         tp3 = tp3_atr
-        # Safety: pastikan urutan tp1 < tp2 < tp3
-        tp1 = max(tp1, round(entry * 1.001, 4))
-        tp2 = max(tp2, round(tp1  * 1.002, 4))
-        tp3 = max(tp3, round(tp2  * 1.002, 4))
-        sl  = min(sl,  round(entry * 0.995, 4))
+        tp1 = max(tp1, round(entry * 1.0001, 5))
+        tp2 = max(tp2, round(tp1  * 1.0002, 5))
+        tp3 = max(tp3, round(tp2  * 1.0002, 5))
+        sl  = min(sl,  round(entry * 0.9950, 5))
 
-    elif signal == "SELL":
-        entry = round(current_price, 4)
-        sl_atr  = round(entry + (atr * 1.5), 4)
-        sl_sr   = round(resistances[0] * 1.002, 4) if resistances else sl_atr
+    else:  # SELL
+        sl_atr  = round(entry + (atr * 1.5), 5)
+        sl_sr   = round(resistances[0] * 1.0002, 5) if resistances else sl_atr
         sl      = max(sl_atr, sl_sr)
-        tp1_atr = round(entry - (atr * 2.0), 4)
-        tp2_atr = round(entry - (atr * 3.5), 4)
-        tp3_atr = round(entry - (atr * 5.0), 4)
+        tp1_atr = round(entry - (atr * 2.0), 5)
+        tp2_atr = round(entry - (atr * 3.5), 5)
+        tp3_atr = round(entry - (atr * 5.0), 5)
         if supports:
-            s1 = round(supports[0] * 1.001, 4)
+            s1  = round(supports[0] * 1.0001, 5)
             tp1 = max(tp1_atr, s1) if s1 < entry else tp1_atr
         else:
             tp1 = tp1_atr
         tp2 = tp2_atr
         tp3 = tp3_atr
-        tp1 = min(tp1, round(entry * 0.999, 4))
-        tp2 = min(tp2, round(tp1  * 0.998, 4))
-        tp3 = min(tp3, round(tp2  * 0.998, 4))
-        sl  = max(sl,  round(entry * 1.005, 4))
-    else:
-        return None
+        tp1 = min(tp1, round(entry * 0.9999, 5))
+        tp2 = min(tp2, round(tp1  * 0.9998, 5))
+        tp3 = min(tp3, round(tp2  * 0.9998, 5))
+        sl  = max(sl,  round(entry * 1.0050, 5))
 
-    sl_pct   = abs((sl  - entry) / entry * 100)
-    tp1_pct  = abs((tp1 - entry) / entry * 100)
-    tp2_pct  = abs((tp2 - entry) / entry * 100)
-    tp3_pct  = abs((tp3 - entry) / entry * 100)
+    sl_pct  = abs((sl  - entry) / entry * 100)
+    tp1_pct = abs((tp1 - entry) / entry * 100)
+    tp2_pct = abs((tp2 - entry) / entry * 100)
+    tp3_pct = abs((tp3 - entry) / entry * 100)
     rr_ratio = round(tp1_pct / sl_pct, 2) if sl_pct > 0 else 0
 
-    qty = round(modal_usdt / entry, 6)
-
-    if signal == "BUY":
-        profit_tp1 = round((tp1 - entry) * qty, 2)
-        profit_tp2 = round((tp2 - entry) * qty, 2)
-        profit_tp3 = round((tp3 - entry) * qty, 2)
+    # Auto-detect pip size & lot size berdasarkan harga
+    # Forex (< 100): pip = 0.00010, lot dari 100k unit
+    # Gold/Indices (>= 100): pip = 0.10, lot dari 10 unit
+    if entry >= 100:
+        pip_size = 0.10
+        lot_size = round(modal_usd / (entry * 10), 4)
     else:
-        profit_tp1 = round((entry - tp1) * qty, 2)
-        profit_tp2 = round((entry - tp2) * qty, 2)
-        profit_tp3 = round((entry - tp3) * qty, 2)
+        pip_size = 0.00010
+        lot_size = round(modal_usd / (entry * 1000), 4)
 
-    loss_sl = round(abs((sl - entry) * qty), 2)
+    sl_pips   = round(abs(sl  - entry) / pip_size, 1)
+    tp1_pips  = round(abs(tp1 - entry) / pip_size, 1)
+    tp2_pips  = round(abs(tp2 - entry) / pip_size, 1)
+    tp3_pips  = round(abs(tp3 - entry) / pip_size, 1)
+    profit_tp1  = round(tp1_pips * lot_size * 1.0, 2)
+    profit_tp2  = round(tp2_pips * lot_size * 1.0, 2)
+    profit_tp3  = round(tp3_pips * lot_size * 1.0, 2)
+    loss_sl     = round(sl_pips  * lot_size * 1.0, 2)
 
     return {
         "signal":     signal,
@@ -849,18 +693,23 @@ def generate_trading_plan(df, price_data, signal, supports, resistances, modal_u
         "tp1":        tp1,
         "tp2":        tp2,
         "tp3":        tp3,
-        "sl_pct":     round(sl_pct,  2),
-        "tp1_pct":    round(tp1_pct, 2),
-        "tp2_pct":    round(tp2_pct, 2),
-        "tp3_pct":    round(tp3_pct, 2),
+        "sl_pct":     round(sl_pct,  4),
+        "tp1_pct":    round(tp1_pct, 4),
+        "tp2_pct":    round(tp2_pct, 4),
+        "tp3_pct":    round(tp3_pct, 4),
+        "sl_pips":    sl_pips,
+        "tp1_pips":   tp1_pips,
+        "tp2_pips":   tp2_pips,
+        "tp3_pips":   tp3_pips,
         "rr_ratio":   rr_ratio,
-        "qty":        qty,
-        "modal":      modal_usdt,
+        "lot_size":   lot_size,
+        "modal":      modal_usd,
+        "leverage":   leverage,
         "profit_tp1": profit_tp1,
         "profit_tp2": profit_tp2,
         "profit_tp3": profit_tp3,
         "loss_sl":    loss_sl,
-        "atr":        round(atr, 4),
+        "atr":        round(atr, 5),
     }
 
 # ─────────────────────────────────────────────
@@ -944,111 +793,83 @@ def generate_ai_reasoning(signal, decision, decision_reason, score_detail, indic
 
     return points, conclusion, color
 
+# ─────────────────────────────────────────────
+#  CHART
+# ─────────────────────────────────────────────
 def build_chart(df, symbol, resistances=[], supports=[]):
-    fig = make_subplots(
-        rows=3, cols=1,
-        shared_xaxes=True,
-        vertical_spacing=0.03,
-        row_heights=[0.6, 0.2, 0.2]
-    )
+    fig = make_subplots(rows=3, cols=1, shared_xaxes=True, vertical_spacing=0.03, row_heights=[0.6, 0.2, 0.2])
 
-    # Candlestick
     fig.add_trace(go.Candlestick(
-        x=df["timestamp"],
-        open=df["open"], high=df["high"],
-        low=df["low"], close=df["close"],
-        name="Price",
-        increasing_line_color="#3fb950",
-        decreasing_line_color="#f85149",
-        increasing_fillcolor="#0d2b1d",
-        decreasing_fillcolor="#2d1b1b",
+        x=df["timestamp"], open=df["open"], high=df["high"], low=df["low"], close=df["close"],
+        name="Price", increasing_line_color="#3fb950", decreasing_line_color="#f85149",
+        increasing_fillcolor="#0d2b1d", decreasing_fillcolor="#2d1b1b",
     ), row=1, col=1)
 
-    # EMA lines
     ema20 = ta.trend.EMAIndicator(df["close"], window=20).ema_indicator()
     ema50 = ta.trend.EMAIndicator(df["close"], window=50).ema_indicator()
-    fig.add_trace(go.Scatter(x=df["timestamp"], y=ema20, name="EMA20",
-        line=dict(color="#f0883e", width=1.5, dash="dot")), row=1, col=1)
-    fig.add_trace(go.Scatter(x=df["timestamp"], y=ema50, name="EMA50",
-        line=dict(color="#388bfd", width=1.5, dash="dot")), row=1, col=1)
+    fig.add_trace(go.Scatter(x=df["timestamp"], y=ema20, name="EMA20", line=dict(color="#f0883e", width=1.5, dash="dot")), row=1, col=1)
+    fig.add_trace(go.Scatter(x=df["timestamp"], y=ema50, name="EMA50", line=dict(color="#388bfd", width=1.5, dash="dot")), row=1, col=1)
 
-    # Bollinger Bands
     bb = ta.volatility.BollingerBands(df["close"], window=20)
-    fig.add_trace(go.Scatter(x=df["timestamp"], y=bb.bollinger_hband(),
-        name="BB Upper", line=dict(color="#8b949e", width=1, dash="dash"), showlegend=False), row=1, col=1)
-    fig.add_trace(go.Scatter(x=df["timestamp"], y=bb.bollinger_lband(),
-        name="BB Lower", line=dict(color="#8b949e", width=1, dash="dash"),
-        fill="tonexty", fillcolor="rgba(139,148,158,0.05)", showlegend=False), row=1, col=1)
+    fig.add_trace(go.Scatter(x=df["timestamp"], y=bb.bollinger_hband(), name="BB Upper", line=dict(color="#8b949e", width=1, dash="dash"), showlegend=False), row=1, col=1)
+    fig.add_trace(go.Scatter(x=df["timestamp"], y=bb.bollinger_lband(), name="BB Lower", line=dict(color="#8b949e", width=1, dash="dash"), fill="tonexty", fillcolor="rgba(139,148,158,0.05)", showlegend=False), row=1, col=1)
 
-    # Support & Resistance lines
     for r in resistances:
-        fig.add_hline(y=r, line_dash="dash", line_color="#f85149", opacity=0.6, row=1, col=1,
-                      annotation_text=f"R {r:,.4f}", annotation_position="right")
+        fig.add_hline(y=r, line_dash="dash", line_color="#f85149", opacity=0.6, row=1, col=1, annotation_text=f"R {r:.5f}", annotation_position="right")
     for s in supports:
-        fig.add_hline(y=s, line_dash="dash", line_color="#3fb950", opacity=0.6, row=1, col=1,
-                      annotation_text=f"S {s:,.4f}", annotation_position="right")
+        fig.add_hline(y=s, line_dash="dash", line_color="#3fb950", opacity=0.6, row=1, col=1, annotation_text=f"S {s:.5f}", annotation_position="right")
 
-    # Volume
-    colors = ["#3fb950" if df["close"].iloc[i] >= df["open"].iloc[i] else "#f85149"
-              for i in range(len(df))]
-    fig.add_trace(go.Bar(x=df["timestamp"], y=df["volume"], name="Volume",
-        marker_color=colors, opacity=0.7), row=2, col=1)
+    colors = ["#3fb950" if df["close"].iloc[i] >= df["open"].iloc[i] else "#f85149" for i in range(len(df))]
+    fig.add_trace(go.Bar(x=df["timestamp"], y=df["volume"], name="Volume", marker_color=colors, opacity=0.7), row=2, col=1)
 
-    # RSI
     rsi = ta.momentum.RSIIndicator(df["close"], window=14).rsi()
-    fig.add_trace(go.Scatter(x=df["timestamp"], y=rsi, name="RSI",
-        line=dict(color="#d2a8ff", width=1.5)), row=3, col=1)
+    fig.add_trace(go.Scatter(x=df["timestamp"], y=rsi, name="RSI", line=dict(color="#d2a8ff", width=1.5)), row=3, col=1)
     fig.add_hline(y=70, line_dash="dash", line_color="#f85149", opacity=0.5, row=3, col=1)
     fig.add_hline(y=30, line_dash="dash", line_color="#3fb950", opacity=0.5, row=3, col=1)
 
     fig.update_layout(
-        plot_bgcolor="#0d1117",
-        paper_bgcolor="#0d1117",
-        font=dict(color="#8b949e", size=11),
-        height=600,
+        plot_bgcolor="#0d1117", paper_bgcolor="#0d1117",
+        font=dict(color="#8b949e", size=11), height=580,
         margin=dict(l=0, r=0, t=30, b=0),
-        legend=dict(orientation="h", yanchor="bottom", y=1.02,
-                    bgcolor="rgba(0,0,0,0)", font=dict(size=10)),
+        legend=dict(orientation="h", yanchor="bottom", y=1.02, bgcolor="rgba(0,0,0,0)", font=dict(size=10)),
         xaxis_rangeslider_visible=False,
     )
     fig.update_yaxes(gridcolor="#21262d", zerolinecolor="#21262d")
     fig.update_xaxes(gridcolor="#21262d", zerolinecolor="#21262d")
-
     return fig
 
 # ─────────────────────────────────────────────
-#  SESSION STATE DEFAULTS
+#  SESSION STATE
 # ─────────────────────────────────────────────
-if "symbol" not in st.session_state:
-    st.session_state["symbol"] = "BTCUSDT"
-if "interval_val" not in st.session_state:
-    st.session_state["interval_val"] = "1h"
-if "candles" not in st.session_state:
-    st.session_state["candles"] = 200
-if "auto_refresh" not in st.session_state:
-    st.session_state["auto_refresh"] = False
+if "auto_refresh_mt5" not in st.session_state:
+    st.session_state["auto_refresh_mt5"] = False
+
+# ─────────────────────────────────────────────
+#  MT5 INIT CHECK
+# ─────────────────────────────────────────────
+connected = init_mt5()
+if not connected:
+    st.error("❌ Gagal konek ke MT5! Pastiin MetaTrader 5 sedang running di VPS.")
+    st.stop()
 
 # ─────────────────────────────────────────────
 #  MAIN CONTENT
 # ─────────────────────────────────────────────
+DEFAULT_PAIRS = ["EURUSD", "GBPUSD", "USDJPY", "USDCHF", "AUDUSD", "XAUUSD"]
 
-# Mobile-friendly pair selector
-DEFAULT_PAIRS = ["BTCUSDT", "ETHUSDT", "BNBUSDT", "SOLUSDT", "XRPUSDT", "DOGEUSDT"]
-col_sel1, col_sel2 = st.columns([2,1])
+col_sel1, col_sel2 = st.columns([2, 1])
 with col_sel1:
-    symbol = st.selectbox("🪙 Select Pair", DEFAULT_PAIRS)
+    symbol = st.selectbox("🌍 Select Pair", DEFAULT_PAIRS)
 with col_sel2:
-    custom = st.text_input("Custom pair", placeholder="e.g. ADAUSDT")
+    custom = st.text_input("Custom pair", placeholder="e.g. NZDUSD")
     if custom:
         symbol = custom.upper()
 
-# Tabs
-tab1, tab2, tab3, tab4, tab5 = st.tabs(["📊 Dashboard", "🕐 Multi-Timeframe", "🔥 Top Gainers", "🧪 Backtesting", "⚙️ Settings"])
+tab1, tab2, tab3, tab4, tab5 = st.tabs(["📊 Dashboard", "🕐 Multi-Timeframe", "🌍 Market Watch", "🧪 Backtesting", "⚙️ Settings"])
 
 # ─── TAB 1: DASHBOARD ───
 with tab1:
-    # Chart settings inline
-    col_tf, col_candle = st.columns([2,1])
+    col_tf, col_candle = st.columns([2, 1])
     with col_tf:
         interval = st.selectbox("⏱ Timeframe", [
             ("1 Minute","1m"),("5 Minutes","5m"),("15 Minutes","15m"),
@@ -1058,29 +879,28 @@ with tab1:
     with col_candle:
         candles = st.slider("Candles", 50, 500, 200)
 
-    price_data = get_price(symbol, BINANCE_API_KEY, BINANCE_API_SECRET)
-
+    price_data = get_mt5_price(symbol)
     if price_data is None:
-        st.error(f"Gagal ambil data {symbol}. Cek API key atau nama pair.")
+        st.error(f"Gagal ambil data {symbol}. Pastiin MT5 running & pair tersedia.")
         st.stop()
 
-    price = price_data["price"]
-    change = price_data["change"]
-    change_color = "#3fb950" if change >= 0 else "#f85149"
+    bid = price_data["bid"]
+    ask = price_data["ask"]
+    digits = price_data["digits"]
+    fmt = f",.{digits}f"
 
-    # Header
     col_h1, col_h2 = st.columns([3, 1])
     with col_h1:
         st.markdown(f"""
         <div style="margin-bottom:8px;">
-            <span style="font-size:28px; font-weight:800; color:#e6edf3;">{symbol}</span>
-            <span style="font-size:13px; color:#8b949e; margin-left:12px;">BINANCE SPOT</span>
+            <span style="font-size:26px; font-weight:800; color:#e6edf3;">{symbol}</span>
+            <span style="font-size:12px; color:#8b949e; margin-left:12px;">MT5 FOREX</span>
         </div>
         <div>
-            <span style="font-size:36px; font-weight:700; color:#e6edf3;">${price:,.4f}</span>
-            <span style="font-size:16px; color:{change_color}; margin-left:12px;">
-                {'▲' if change >= 0 else '▼'} {abs(change):.2f}%
-            </span>
+            <span style="font-size:14px; color:#8b949e;">BID </span>
+            <span style="font-size:32px; font-weight:700; color:#3fb950;">{bid:{fmt}}</span>
+            <span style="font-size:14px; color:#8b949e; margin-left:16px;">ASK </span>
+            <span style="font-size:32px; font-weight:700; color:#f85149;">{ask:{fmt}}</span>
         </div>
         """, unsafe_allow_html=True)
     with col_h2:
@@ -1093,28 +913,22 @@ with tab1:
 
     st.markdown("---")
 
-    # Metrics
-    col1, col2, col3, col4 = st.columns(4)
-    with col1:
-        st.metric("24h High", f"${price_data['high']:,.4f}")
-    with col2:
-        st.metric("24h Low", f"${price_data['low']:,.4f}")
-    with col3:
-        vol_m = price_data["quoteVolume"] / 1_000_000
-        st.metric("Volume (USDT)", f"${vol_m:,.1f}M")
-    with col4:
-        st.metric("24h Change", f"{change:+.2f}%",
-                  delta=f"{'Up' if change >= 0 else 'Down'}")
+    df = get_mt5_klines(symbol, interval_val, candles)
+    resistances, supports = get_support_resistance(df)
+
+    if df is not None:
+        col1, col2, col3, col4 = st.columns(4)
+        with col1: st.metric("Open", f"{df['open'].iloc[-1]:{fmt}}")
+        with col2: st.metric("High", f"{df['high'].iloc[-1]:{fmt}}")
+        with col3: st.metric("Low", f"{df['low'].iloc[-1]:{fmt}}")
+        with col4: st.metric("Volume", f"{int(df['volume'].iloc[-1]):,}")
 
     st.markdown("---")
 
-    # Chart + Signal
     col_chart, col_signal = st.columns([3, 1])
 
     with col_chart:
         st.markdown('<p class="section-header">Price Chart</p>', unsafe_allow_html=True)
-        df = get_klines(symbol, interval_val, candles, BINANCE_API_KEY, BINANCE_API_SECRET)
-        resistances, supports = get_support_resistance(df)
         if df is not None:
             fig = build_chart(df, symbol, resistances, supports)
             st.plotly_chart(fig, use_container_width=True)
@@ -1126,30 +940,26 @@ with tab1:
 
     with col_signal:
         st.markdown('<p class="section-header">AI Signal</p>', unsafe_allow_html=True)
-
         if df is not None:
             # Map interval_val ke label TF untuk exclude dari MTF scoring
             tf_label_map = {"1m":"1M","5m":"5M","15m":"15M","1h":"1H","4h":"4H","1d":"1D"}
             current_tf_label = tf_label_map.get(interval_val, "1H")
 
             # Hitung MTF score real dari TF lain (1H/4H/1D)
-            mtf_real = calculate_mtf_score(symbol, current_tf_label, BINANCE_API_KEY, BINANCE_API_SECRET)
+            mtf_real = calculate_mtf_score(symbol, current_tf_label)
 
             signal, reason, signals, indicators, confidence, score_detail = calculate_signal(df, mtf_score_override=mtf_real)
             decision, decision_reason, decision_color = calculate_trade_decision(
                 signal, score_detail, df, supports, resistances
             )
-
             signal_class = f"signal-{signal.lower()}"
             signal_emoji = "🟢" if signal == "BUY" else "🔴" if signal == "SELL" else "🔵"
             strength_color = "#3fb950" if signal == "BUY" else "#f85149" if signal == "SELL" else "#388bfd"
 
-            # Decision badge styling
             decision_emoji = "🟢" if decision == "ENTER" else "🟡" if decision == "WAIT" else "🔴"
             decision_bg    = "rgba(63,185,80,0.12)"  if decision == "ENTER" else \
                              "rgba(240,136,62,0.12)" if decision == "WAIT"  else \
                              "rgba(248,81,73,0.08)"
-            decision_border = decision_color
 
             st.markdown(f"""
             <div class="{signal_class}">
@@ -1162,7 +972,7 @@ with tab1:
                 <div style="
                     margin-top:14px;
                     background:{decision_bg};
-                    border:1px solid {decision_border};
+                    border:1px solid {decision_color};
                     border-radius:6px;
                     padding:10px 12px;
                     text-align:center;
@@ -1175,8 +985,8 @@ with tab1:
             </div>
             """, unsafe_allow_html=True)
 
-            # Filled after the analysis blocks are prepared, but rendered here so
-            # the explanation stays directly below the signal card.
+            # Filled later, but rendered here so the explanation stays directly
+            # below the signal card and before the score breakdown.
             reasoning_container = st.container()
 
             # ── Score Breakdown ──────────────────
@@ -1214,44 +1024,37 @@ with tab1:
 
             st.markdown("<br>", unsafe_allow_html=True)
             st.markdown('<p class="section-header">Indicators</p>', unsafe_allow_html=True)
-
             for ind_name, (ind_val, ind_color) in signals.items():
                 badge_class = f"badge-{'green' if ind_color == 'green' else 'red' if ind_color == 'red' else 'neutral'}"
-                st.markdown(f"""
-                <span style="color:#8b949e; font-size:12px;">{ind_name}</span>
-                <span class="badge {badge_class}">{ind_val}</span><br>
-                """, unsafe_allow_html=True)
+                st.markdown(f'<span style="color:#8b949e; font-size:12px;">{ind_name}</span> <span class="badge {badge_class}">{ind_val}</span><br>', unsafe_allow_html=True)
 
             if indicators:
                 st.markdown("<br>", unsafe_allow_html=True)
                 st.markdown('<p class="section-header">Values</p>', unsafe_allow_html=True)
                 for k, v in indicators.items():
-                    st.markdown(f"""
-                    <div style="display:flex; justify-content:space-between; padding:4px 0; border-bottom:1px solid #21262d;">
-                        <span style="color:#8b949e; font-size:12px;">{k}</span>
-                        <span style="color:#e6edf3; font-size:12px; font-weight:600;">{v}</span>
-                    </div>
-                    """, unsafe_allow_html=True)
+                    st.markdown(f'<div style="display:flex; justify-content:space-between; padding:4px 0; border-bottom:1px solid #21262d;"><span style="color:#8b949e; font-size:12px;">{k}</span><span style="color:#e6edf3; font-size:12px; font-weight:600;">{v}</span></div>', unsafe_allow_html=True)
 
-            # Support & Resistance
-            price = price_data["price"]
             st.markdown("<br>", unsafe_allow_html=True)
             st.markdown('<p class="section-header">Support & Resistance</p>', unsafe_allow_html=True)
             for r in resistances:
-                st.markdown(f'<div class="sr-level sr-resistance"><span style="color:#8b949e;">Resistance</span><span style="color:#f85149; font-weight:700;">${r:,.4f}</span></div>', unsafe_allow_html=True)
-            st.markdown(f'<div style="text-align:center; padding:4px; color:#e6edf3; font-size:12px; font-weight:700;">── Now: ${price:,.4f} ──</div>', unsafe_allow_html=True)
+                st.markdown(f'<div class="sr-level sr-resistance"><span style="color:#8b949e;">Resistance</span><span style="color:#f85149; font-weight:700;">{r:.5f}</span></div>', unsafe_allow_html=True)
+            st.markdown(f'<div style="text-align:center; padding:4px; color:#e6edf3; font-size:12px; font-weight:700;">── Now: {bid:{fmt}} ──</div>', unsafe_allow_html=True)
             for s in supports:
-                st.markdown(f'<div class="sr-level sr-support"><span style="color:#8b949e;">Support</span><span style="color:#3fb950; font-weight:700;">${s:,.4f}</span></div>', unsafe_allow_html=True)
+                st.markdown(f'<div class="sr-level sr-support"><span style="color:#8b949e;">Support</span><span style="color:#3fb950; font-weight:700;">{s:.5f}</span></div>', unsafe_allow_html=True)
 
     # Trading Plan — rendered in the left column below Price Chart
     with trading_plan_container:
         st.markdown("---")
         st.markdown('<p class="section-header">📋 Trading Plan</p>', unsafe_allow_html=True)
 
-        modal = st.number_input("💵 Modal (USDT)", min_value=1.0, value=100.0, step=10.0, format="%.2f")
+        col_m1, col_m2 = st.columns([1, 1])
+        with col_m1:
+            modal = st.number_input("💵 Modal (USD)", min_value=1.0, value=100.0, step=10.0, format="%.2f")
+        with col_m2:
+            leverage = st.selectbox("⚡ Leverage", [1, 10, 50, 100, 200, 500], index=3)
     
-        if df is not None and price_data is not None and decision == "ENTER":
-            plan = generate_trading_plan(df, price_data, signal, supports, resistances, modal_usdt=modal)
+        if df is not None and decision == "ENTER":
+            plan = generate_trading_plan(df, bid, signal, supports, resistances, modal_usd=modal, leverage=leverage)
     
             if plan:
                 rr_color = "#3fb950" if plan["rr_ratio"] >= 1.5 else "#f0883e" if plan["rr_ratio"] >= 1 else "#f85149"
@@ -1259,109 +1062,47 @@ with tab1:
                 action_emoji = "🟢" if plan["signal"] == "BUY" else "🔴"
     
                 col_p1, col_p2, col_p3 = st.columns(3)
-    
                 with col_p1:
                     st.markdown(f"""
                     <div class="tp-card">
                         <p style="color:#8b949e; font-size:11px; text-transform:uppercase; letter-spacing:1px; margin:0 0 12px 0;">Entry & Exit</p>
-                        <div class="tp-row">
-                            <span class="tp-label">Action</span>
-                            <span class="tp-value" style="color:{action_color};">{action_emoji} {plan["signal"]}</span>
-                        </div>
-                        <div class="tp-row">
-                            <span class="tp-label">Entry Price</span>
-                            <span class="tp-value tp-yellow">${plan["entry"]:,.4f}</span>
-                        </div>
-                        <div class="tp-row">
-                            <span class="tp-label">Stop Loss</span>
-                            <span class="tp-value tp-red">${plan["sl"]:,.4f} (-{plan["sl_pct"]}%)</span>
-                        </div>
-                        <div class="tp-row">
-                            <span class="tp-label">TP 1</span>
-                            <span class="tp-value tp-green">${plan["tp1"]:,.4f} (+{plan["tp1_pct"]}%)</span>
-                        </div>
-                        <div class="tp-row">
-                            <span class="tp-label">TP 2</span>
-                            <span class="tp-value tp-green">${plan["tp2"]:,.4f} (+{plan["tp2_pct"]}%)</span>
-                        </div>
-                        <div class="tp-row">
-                            <span class="tp-label">TP 3</span>
-                            <span class="tp-value tp-green">${plan["tp3"]:,.4f} (+{plan["tp3_pct"]}%)</span>
-                        </div>
+                        <div class="tp-row"><span class="tp-label">Action</span><span class="tp-value" style="color:{action_color};">{action_emoji} {plan["signal"]}</span></div>
+                        <div class="tp-row"><span class="tp-label">Entry</span><span class="tp-value tp-yellow">{plan["entry"]:.5f}</span></div>
+                        <div class="tp-row"><span class="tp-label">Stop Loss</span><span class="tp-value tp-red">{plan["sl"]:.5f} ({plan["sl_pips"]} pips)</span></div>
+                        <div class="tp-row"><span class="tp-label">TP 1</span><span class="tp-value tp-green">{plan["tp1"]:.5f} ({plan["tp1_pips"]} pips)</span></div>
+                        <div class="tp-row"><span class="tp-label">TP 2</span><span class="tp-value tp-green">{plan["tp2"]:.5f} ({plan["tp2_pips"]} pips)</span></div>
+                        <div class="tp-row"><span class="tp-label">TP 3</span><span class="tp-value tp-green">{plan["tp3"]:.5f} ({plan["tp3_pips"]} pips)</span></div>
                     </div>
                     """, unsafe_allow_html=True)
-    
                 with col_p2:
                     st.markdown(f"""
                     <div class="tp-card">
                         <p style="color:#8b949e; font-size:11px; text-transform:uppercase; letter-spacing:1px; margin:0 0 12px 0;">Risk & Reward</p>
-                        <div class="tp-row">
-                            <span class="tp-label">R/R Ratio</span>
-                            <span class="tp-value" style="color:{rr_color};">1 : {plan["rr_ratio"]}</span>
-                        </div>
-                        <div class="tp-row">
-                            <span class="tp-label">ATR</span>
-                            <span class="tp-value">${plan["atr"]:,.4f}</span>
-                        </div>
-                        <div class="tp-row">
-                            <span class="tp-label">Modal</span>
-                            <span class="tp-value">${plan["modal"]:,.2f} USDT</span>
-                        </div>
-                        <div class="tp-row">
-                            <span class="tp-label">Qty</span>
-                            <span class="tp-value">{plan["qty"]} {symbol.replace("USDT","")}</span>
-                        </div>
+                        <div class="tp-row"><span class="tp-label">R/R Ratio</span><span class="tp-value" style="color:{rr_color};">1 : {plan["rr_ratio"]}</span></div>
+                        <div class="tp-row"><span class="tp-label">ATR</span><span class="tp-value">{plan["atr"]:.5f}</span></div>
+                        <div class="tp-row"><span class="tp-label">Modal</span><span class="tp-value">${plan["modal"]:,.2f}</span></div>
+                        <div class="tp-row"><span class="tp-label">Lot Size</span><span class="tp-value">{plan["lot_size"]}</span></div>
+                        <div class="tp-row"><span class="tp-label">Leverage</span><span class="tp-value">1:{plan["leverage"]}</span></div>
                     </div>
                     """, unsafe_allow_html=True)
-    
                 with col_p3:
                     st.markdown(f"""
                     <div class="tp-card">
                         <p style="color:#8b949e; font-size:11px; text-transform:uppercase; letter-spacing:1px; margin:0 0 12px 0;">Estimasi P&L</p>
-                        <div class="tp-row">
-                            <span class="tp-label">Profit TP1</span>
-                            <span class="tp-value tp-green">+${plan["profit_tp1"]}</span>
-                        </div>
-                        <div class="tp-row">
-                            <span class="tp-label">Profit TP2</span>
-                            <span class="tp-value tp-green">+${plan["profit_tp2"]}</span>
-                        </div>
-                        <div class="tp-row">
-                            <span class="tp-label">Profit TP3</span>
-                            <span class="tp-value tp-green">+${plan["profit_tp3"]}</span>
-                        </div>
-                        <div class="tp-row">
-                            <span class="tp-label">Max Loss</span>
-                            <span class="tp-value tp-red">-${plan["loss_sl"]}</span>
-                        </div>
-                        <div class="tp-row">
-                            <span class="tp-label">Worth it?</span>
-                            <span class="tp-value" style="color:{rr_color};">{"✅ YES" if plan["rr_ratio"] >= 1.5 else "⚠️ MARGINAL" if plan["rr_ratio"] >= 1 else "❌ NO"}</span>
-                        </div>
+                        <div class="tp-row"><span class="tp-label">Profit TP1</span><span class="tp-value tp-green">+${plan["profit_tp1"]}</span></div>
+                        <div class="tp-row"><span class="tp-label">Profit TP2</span><span class="tp-value tp-green">+${plan["profit_tp2"]}</span></div>
+                        <div class="tp-row"><span class="tp-label">Profit TP3</span><span class="tp-value tp-green">+${plan["profit_tp3"]}</span></div>
+                        <div class="tp-row"><span class="tp-label">Max Loss</span><span class="tp-value tp-red">-${plan["loss_sl"]}</span></div>
+                        <div class="tp-row"><span class="tp-label">Worth it?</span><span class="tp-value" style="color:{rr_color};">{"✅ YES" if plan["rr_ratio"] >= 1.5 else "⚠️ MARGINAL" if plan["rr_ratio"] >= 1 else "❌ NO"}</span></div>
                     </div>
                     """, unsafe_allow_html=True)
-    
-                st.markdown(f"""
-                <div style="background:#161b22; border:1px solid #30363d; border-radius:8px; padding:12px; margin-top:8px;">
-                    <p style="color:#8b949e; font-size:12px; margin:0;">
-                    💡 <strong style="color:#e6edf3;">Cara pakai:</strong>
-                    Entry di <strong style="color:#f0883e;">${plan["entry"]:,.4f}</strong> →
-                    Pasang SL di <strong style="color:#f85149;">${plan["sl"]:,.4f}</strong> →
-                    Take profit sebagian di TP1 <strong style="color:#3fb950;">${plan["tp1"]:,.4f}</strong>,
-                    sisanya di TP2 <strong style="color:#3fb950;">${plan["tp2"]:,.4f}</strong>.
-                    R/R ratio <strong style="color:{rr_color};">1:{plan["rr_ratio"]}</strong>
-                    {"— trade ini worth it! ✅" if plan["rr_ratio"] >= 1.5 else "— pertimbangkan ulang ⚠️" if plan["rr_ratio"] >= 1 else "— skip trade ini ❌"}
-                    </p>
-                </div>
-                """, unsafe_allow_html=True)
-    
             else:
-                st.info("⏳ Sinyal HOLD — Trading plan tidak tersedia. Tunggu sinyal BUY/SELL yang lebih jelas.")
-        elif df is not None and price_data is not None:
+                st.info("⏳ Sinyal HOLD — Tunggu sinyal BUY/SELL yang lebih jelas.")
+        elif df is not None:
             st.warning(f"Trading Plan dikunci — keputusan AI: {decision}. {decision_reason}")
     
     # AI Reasoning — rendered in the right column below AI Signal
-    if df is not None and price_data is not None:
+    if df is not None:
         with reasoning_container:
             reasoning_points, reasoning_conclusion, reasoning_color = generate_ai_reasoning(
                 signal, decision, decision_reason, score_detail, indicators, supports, resistances
@@ -1392,21 +1133,15 @@ with tab2:
     st.markdown(f"<p style='color:#8b949e; font-size:13px;'>Analisis {symbol} dari 3 timeframe sekaligus</p>", unsafe_allow_html=True)
 
     with st.spinner("Menganalisis semua timeframe..."):
-        mtf_results = multi_timeframe_analysis(symbol, BINANCE_API_KEY, BINANCE_API_SECRET)
+        mtf_results = multi_timeframe_analysis(symbol)
 
     buy_count = sum(1 for _, s, _, _ in mtf_results if s == "BUY")
     sell_count = sum(1 for _, s, _, _ in mtf_results if s == "SELL")
     hold_count = sum(1 for _, s, _, _ in mtf_results if s == "HOLD")
 
-    if buy_count >= 2:
-        consensus_color = "#3fb950"; consensus_emoji = "🟢"
-        consensus_text = "STRONG BUY" if buy_count == 3 else "BUY"
-    elif sell_count >= 2:
-        consensus_color = "#f85149"; consensus_emoji = "🔴"
-        consensus_text = "STRONG SELL" if sell_count == 3 else "SELL"
-    else:
-        consensus_color = "#388bfd"; consensus_emoji = "🔵"
-        consensus_text = "MIXED / HOLD"
+    if buy_count >= 2: consensus_color = "#3fb950"; consensus_emoji = "🟢"; consensus_text = "STRONG BUY" if buy_count == 3 else "BUY"
+    elif sell_count >= 2: consensus_color = "#f85149"; consensus_emoji = "🔴"; consensus_text = "STRONG SELL" if sell_count == 3 else "SELL"
+    else: consensus_color = "#388bfd"; consensus_emoji = "🔵"; consensus_text = "MIXED / HOLD"
 
     st.markdown(f"""
     <div style="background:#161b22; border:1px solid #30363d; border-radius:12px; padding:24px; text-align:center; margin-bottom:24px;">
@@ -1418,17 +1153,15 @@ with tab2:
 
     col_mtf1, col_mtf2, col_mtf3 = st.columns(3)
     cols = [col_mtf1, col_mtf2, col_mtf3]
-    for i, (label, signal, reason, confidence) in enumerate(mtf_results):
-        color = "#3fb950" if signal == "BUY" else "#f85149" if signal == "SELL" else "#388bfd"
-        emoji = "🟢" if signal == "BUY" else "🔴" if signal == "SELL" else "🔵"
+    for i, (label, sig, reason, confidence) in enumerate(mtf_results):
+        color = "#3fb950" if sig == "BUY" else "#f85149" if sig == "SELL" else "#388bfd"
+        emoji = "🟢" if sig == "BUY" else "🔴" if sig == "SELL" else "🔵"
         with cols[i]:
             st.markdown(f"""
-            <div class="mtf-card mtf-{signal.lower()}">
+            <div class="mtf-card mtf-{sig.lower()}">
                 <p style="color:#8b949e; font-size:11px; text-transform:uppercase; letter-spacing:1px; margin:0;">{label}</p>
-                <p style="font-size:22px; font-weight:800; color:{color}; margin:8px 0;">{emoji} {signal}</p>
-                <div class="strength-bar-container">
-                    <div class="strength-bar-fill" style="width:{confidence}%; background:{color};"></div>
-                </div>
+                <p style="font-size:22px; font-weight:800; color:{color}; margin:8px 0;">{emoji} {sig}</p>
+                <div class="strength-bar-container"><div class="strength-bar-fill" style="width:{confidence}%; background:{color};"></div></div>
                 <p style="color:#8b949e; font-size:11px; margin:4px 0;">Confidence: {confidence}%</p>
                 <p style="color:#8b949e; font-size:11px; margin:0;">{reason}</p>
             </div>
@@ -1438,48 +1171,46 @@ with tab2:
     st.markdown("""
     <div style="background:#161b22; border:1px solid #30363d; border-radius:8px; padding:16px;">
         <p style="color:#8b949e; font-size:12px; margin:0;">
-        💡 <strong style="color:#e6edf3;">Cara baca MTF:</strong> Kalau 1H + 4H + 1D semua BUY → sinyal sangat kuat.
-        Kalau 1H BUY tapi 4H/1D SELL → hati-hati, bisa false signal.
+        💡 <strong style="color:#e6edf3;">Cara baca MTF:</strong> Kalau 1H + 4H + 1D semua searah → sinyal sangat kuat.
         Konfirmasi minimal 2 dari 3 timeframe sebelum entry.
         </p>
     </div>
     """, unsafe_allow_html=True)
 
-# ─── TAB 3: TOP GAINERS ───
+# ─── TAB 3: MARKET WATCH ───
 with tab3:
-    st.markdown('<p class="section-header">🔥 Top 10 Gainers Today</p>', unsafe_allow_html=True)
+    st.markdown('<p class="section-header">🌍 Market Watch — Forex & Gold</p>', unsafe_allow_html=True)
 
-    gainers = get_top_gainers(BINANCE_API_KEY, BINANCE_API_SECRET, n=10)
+    with st.spinner("Loading market data..."):
+        all_prices = get_all_prices(DEFAULT_PAIRS)
 
-    if gainers:
-        col_g1, col_g2 = st.columns(2)
-        for i, g in enumerate(gainers):
-            sym = g["symbol"]
-            pct = float(g["priceChangePercent"])
-            pr = float(g["lastPrice"])
-            vol = float(g["quoteVolume"]) / 1_000_000
-            color = "#3fb950" if pct >= 0 else "#f85149"
-
+    if all_prices:
+        col_mw1, col_mw2 = st.columns(2)
+        for i, p in enumerate(all_prices):
+            change_color = "#3fb950" if p["change"] >= 0 else "#f85149"
+            arrow = "▲" if p["change"] >= 0 else "▼"
+            fmt = f",.{p['digits']}f"
             card = f"""
-            <div class="gainer-row">
+            <div class="pair-card">
                 <div>
-                    <span style="color:#e6edf3; font-weight:700; font-size:14px;">{sym}</span>
-                    <span style="color:#8b949e; font-size:11px; margin-left:8px;">Vol ${vol:.1f}M</span>
+                    <span style="color:#e6edf3; font-weight:700; font-size:15px;">{p["symbol"]}</span>
+                </div>
+                <div style="text-align:center;">
+                    <span style="color:#3fb950; font-size:13px;">{p["bid"]:{fmt}}</span>
+                    <span style="color:#8b949e; font-size:11px;"> / </span>
+                    <span style="color:#f85149; font-size:13px;">{p["ask"]:{fmt}}</span>
                 </div>
                 <div style="text-align:right;">
-                    <span style="color:#e6edf3; font-size:13px;">${pr:,.4f}</span><br>
-                    <span style="color:{color}; font-size:13px; font-weight:700;">{'▲' if pct >= 0 else '▼'} {abs(pct):.2f}%</span>
+                    <span style="color:{change_color}; font-size:13px; font-weight:700;">{arrow} {abs(p["change"]):.4f}%</span>
                 </div>
             </div>
             """
             if i % 2 == 0:
-                with col_g1:
+                with col_mw1:
                     st.markdown(card, unsafe_allow_html=True)
             else:
-                with col_g2:
+                with col_mw2:
                     st.markdown(card, unsafe_allow_html=True)
-    else:
-        st.info("Gagal load data gainers. Cek koneksi API.")
 
 # ─── TAB 4: BACKTESTING ───
 with tab4:
@@ -1497,18 +1228,17 @@ with tab4:
     with col_bt3:
         bt_candles = st.slider("Candles (data historis)", 100, 1000, 500)
 
-    bt_modal = st.number_input("💵 Modal per Trade (USDT)", min_value=1.0, value=100.0, step=10.0)
+    bt_modal = st.number_input("💵 Modal per Trade (USD)", min_value=1.0, value=100.0, step=10.0)
 
     if st.button("▶️ Jalankan Backtest", use_container_width=True):
         with st.spinner("Mengambil data historis dan menjalankan simulasi..."):
-            df_bt = get_klines(bt_symbol, bt_interval_val, bt_candles, BINANCE_API_KEY, BINANCE_API_SECRET)
+            df_bt = get_mt5_klines(bt_symbol, bt_interval_val, bt_candles)
 
         if df_bt is None or len(df_bt) < 100:
             st.error("Data tidak cukup untuk backtest. Coba tambah jumlah candles.")
         else:
-            # ── Run backtest ──────────────────────────
-            trades      = []
-            min_window  = 50   # butuh minimal 50 candle untuk indikator
+            trades     = []
+            min_window = 50
 
             for i in range(min_window, len(df_bt) - 1):
                 df_slice = df_bt.iloc[:i+1].copy()
@@ -1527,13 +1257,10 @@ with tab4:
                 if signal_bt == "BUY":
                     sl_bt  = entry_price - (atr_bt * 1.5)
                     tp1_bt = entry_price + (atr_bt * 2.0)
-                    tp2_bt = entry_price + (atr_bt * 3.5)
                 else:
                     sl_bt  = entry_price + (atr_bt * 1.5)
                     tp1_bt = entry_price - (atr_bt * 2.0)
-                    tp2_bt = entry_price - (atr_bt * 3.5)
 
-                # Simulasi: cek 10 candle ke depan
                 outcome    = "OPEN"
                 exit_price = None
                 exit_candle = None
@@ -1545,54 +1272,58 @@ with tab4:
 
                     if signal_bt == "BUY":
                         if future_low <= sl_bt:
-                            outcome    = "LOSS"
-                            exit_price = sl_bt
-                            exit_candle = j
-                            break
+                            outcome = "LOSS"; exit_price = sl_bt; exit_candle = j; break
                         elif future_high >= tp1_bt:
-                            outcome    = "WIN"
-                            exit_price = tp1_bt
-                            exit_candle = j
-                            break
+                            outcome = "WIN";  exit_price = tp1_bt; exit_candle = j; break
                     else:
                         if future_high >= sl_bt:
-                            outcome    = "LOSS"
-                            exit_price = sl_bt
-                            exit_candle = j
-                            break
+                            outcome = "LOSS"; exit_price = sl_bt; exit_candle = j; break
                         elif future_low <= tp1_bt:
-                            outcome    = "WIN"
-                            exit_price = tp1_bt
-                            exit_candle = j
-                            break
+                            outcome = "WIN";  exit_price = tp1_bt; exit_candle = j; break
 
                 if outcome == "OPEN":
                     continue
 
-                qty         = bt_modal / entry_price
-                if signal_bt == "BUY":
-                    pnl = (exit_price - entry_price) * qty
+                # Auto-detect pip size berdasarkan harga
+                # Forex (EURUSD dll): harga < 100 → pip = 0.00010
+                # Gold (XAUUSD):      harga > 100 → pip = 0.10
+                # Indices/Oil:        fallback ke persentase
+                if entry_price < 10:
+                    pip_size  = 0.00010   # JPY pairs & crypto-like
+                elif entry_price < 100:
+                    pip_size  = 0.00010   # Forex majors
                 else:
-                    pnl = (entry_price - exit_price) * qty
+                    pip_size  = 0.10      # Gold, Silver, Indices
 
-                sl_dist  = abs(entry_price - sl_bt)
-                tp_dist  = abs(tp1_bt - entry_price)
-                rr_actual = round(tp_dist / sl_dist, 2) if sl_dist > 0 else 0
+                sl_pips  = abs(entry_price - sl_bt) / pip_size
+                tp_pips  = abs(tp1_bt - entry_price) / pip_size
+
+                # Lot size: untuk gold, 1 lot = 100 oz, mini lot = 10 oz
+                # Estimasi lot dari modal: modal / (entry * 10) untuk gold
+                if entry_price > 100:
+                    lot_size = round(bt_modal / (entry_price * 10), 4)
+                else:
+                    lot_size = round(bt_modal / (entry_price * 1000), 4)
+
+                if outcome == "WIN":
+                    pnl = round(tp_pips * lot_size, 2)
+                else:
+                    pnl = round(-sl_pips * lot_size, 2)
+
+                rr_actual = round(tp_pips / sl_pips, 2) if sl_pips > 0 else 0
 
                 trades.append({
-                    "candle":      i,
-                    "timestamp":   df_bt["timestamp"].iloc[i].strftime("%Y-%m-%d %H:%M") if hasattr(df_bt["timestamp"].iloc[i], "strftime") else str(df_bt["timestamp"].iloc[i]),
+                    "timestamp":   str(df_bt["timestamp"].iloc[i])[:16],
                     "signal":      signal_bt,
-                    "entry":       round(entry_price, 4),
-                    "exit":        round(exit_price, 4),
+                    "entry":       round(entry_price, 5),
+                    "exit":        round(exit_price, 5),
                     "outcome":     outcome,
-                    "pnl":         round(pnl, 2),
+                    "pnl":         pnl,
                     "rr":          rr_actual,
                     "score":       score_bt["total"],
                     "exit_candle": exit_candle,
                 })
 
-            # ── Summary ───────────────────────────────
             if not trades:
                 st.warning("Tidak ada trade yang tereksekusi. Coba kurangi threshold score atau tambah candles.")
             else:
@@ -1601,25 +1332,23 @@ with tab4:
                 losses       = [t for t in trades if t["outcome"] == "LOSS"]
                 win_rate     = round(len(wins) / total_trades * 100, 1)
                 total_pnl    = round(sum(t["pnl"] for t in trades), 2)
-                avg_win      = round(sum(t["pnl"] for t in wins) / len(wins), 2) if wins else 0
+                avg_win      = round(sum(t["pnl"] for t in wins)   / len(wins),   2) if wins   else 0
                 avg_loss     = round(sum(t["pnl"] for t in losses) / len(losses), 2) if losses else 0
-                avg_rr       = round(sum(t["rr"] for t in trades) / total_trades, 2)
+                avg_rr       = round(sum(t["rr"]  for t in trades) / total_trades, 2)
                 avg_score    = round(sum(t["score"] for t in trades) / total_trades, 1)
 
-                pnl_color  = "#3fb950" if total_pnl >= 0 else "#f85149"
-                wr_color   = "#3fb950" if win_rate >= 55 else "#f0883e" if win_rate >= 45 else "#f85149"
+                pnl_color = "#3fb950" if total_pnl >= 0 else "#f85149"
+                wr_color  = "#3fb950" if win_rate >= 55 else "#f0883e" if win_rate >= 45 else "#f85149"
 
-                # Summary cards
                 st.markdown("<br>", unsafe_allow_html=True)
                 c1, c2, c3, c4, c5 = st.columns(5)
-                metrics = [
-                    (c1, "Total Trade",  str(total_trades),            "#e6edf3"),
-                    (c2, "Win Rate",     f"{win_rate}%",               wr_color),
-                    (c3, "Total P&L",    f"{'+'if total_pnl>=0 else ''}{total_pnl} USDT", pnl_color),
-                    (c4, "Avg RR",       f"1:{avg_rr}",                "#388bfd"),
-                    (c5, "Avg Score",    f"{avg_score}/100",           "#d2a8ff"),
-                ]
-                for col, label, val, color in metrics:
+                for col, label, val, color in [
+                    (c1, "Total Trade", str(total_trades), "#e6edf3"),
+                    (c2, "Win Rate",    f"{win_rate}%",    wr_color),
+                    (c3, "Total P&L",   f"{'+'if total_pnl>=0 else ''}{total_pnl}$", pnl_color),
+                    (c4, "Avg RR",      f"1:{avg_rr}",     "#388bfd"),
+                    (c5, "Avg Score",   f"{avg_score}/100","#d2a8ff"),
+                ]:
                     with col:
                         st.markdown(f"""
                         <div style="background:#161b22; border:1px solid #30363d; border-radius:8px; padding:14px; text-align:center;">
@@ -1629,97 +1358,76 @@ with tab4:
                         """, unsafe_allow_html=True)
 
                 st.markdown("<br>", unsafe_allow_html=True)
-
-                # Win/Loss breakdown
                 col_wl1, col_wl2 = st.columns(2)
                 with col_wl1:
                     st.markdown(f"""
                     <div style="background:#161b22; border:1px solid #30363d; border-radius:8px; padding:14px;">
                         <p style="color:#8b949e; font-size:11px; text-transform:uppercase; margin:0 0 10px 0;">Win Summary</p>
-                        <div style="display:flex; justify-content:space-between; padding:4px 0;">
-                            <span style="color:#8b949e; font-size:12px;">Total Win</span>
-                            <span style="color:#3fb950; font-weight:700;">{len(wins)} trade</span>
-                        </div>
-                        <div style="display:flex; justify-content:space-between; padding:4px 0;">
-                            <span style="color:#8b949e; font-size:12px;">Avg Profit</span>
-                            <span style="color:#3fb950; font-weight:700;">+{avg_win} USDT</span>
-                        </div>
-                        <div style="display:flex; justify-content:space-between; padding:4px 0;">
-                            <span style="color:#8b949e; font-size:12px;">Total Profit</span>
-                            <span style="color:#3fb950; font-weight:700;">+{round(sum(t["pnl"] for t in wins),2)} USDT</span>
-                        </div>
+                        <div style="display:flex; justify-content:space-between; padding:4px 0;"><span style="color:#8b949e; font-size:12px;">Total Win</span><span style="color:#3fb950; font-weight:700;">{len(wins)} trade</span></div>
+                        <div style="display:flex; justify-content:space-between; padding:4px 0;"><span style="color:#8b949e; font-size:12px;">Avg Profit</span><span style="color:#3fb950; font-weight:700;">+${avg_win}</span></div>
+                        <div style="display:flex; justify-content:space-between; padding:4px 0;"><span style="color:#8b949e; font-size:12px;">Total Profit</span><span style="color:#3fb950; font-weight:700;">+${round(sum(t["pnl"] for t in wins),2)}</span></div>
                     </div>
                     """, unsafe_allow_html=True)
                 with col_wl2:
                     st.markdown(f"""
                     <div style="background:#161b22; border:1px solid #30363d; border-radius:8px; padding:14px;">
                         <p style="color:#8b949e; font-size:11px; text-transform:uppercase; margin:0 0 10px 0;">Loss Summary</p>
-                        <div style="display:flex; justify-content:space-between; padding:4px 0;">
-                            <span style="color:#8b949e; font-size:12px;">Total Loss</span>
-                            <span style="color:#f85149; font-weight:700;">{len(losses)} trade</span>
-                        </div>
-                        <div style="display:flex; justify-content:space-between; padding:4px 0;">
-                            <span style="color:#8b949e; font-size:12px;">Avg Loss</span>
-                            <span style="color:#f85149; font-weight:700;">{avg_loss} USDT</span>
-                        </div>
-                        <div style="display:flex; justify-content:space-between; padding:4px 0;">
-                            <span style="color:#8b949e; font-size:12px;">Total Loss</span>
-                            <span style="color:#f85149; font-weight:700;">{round(sum(t["pnl"] for t in losses),2)} USDT</span>
-                        </div>
+                        <div style="display:flex; justify-content:space-between; padding:4px 0;"><span style="color:#8b949e; font-size:12px;">Total Loss</span><span style="color:#f85149; font-weight:700;">{len(losses)} trade</span></div>
+                        <div style="display:flex; justify-content:space-between; padding:4px 0;"><span style="color:#8b949e; font-size:12px;">Avg Loss</span><span style="color:#f85149; font-weight:700;">${avg_loss}</span></div>
+                        <div style="display:flex; justify-content:space-between; padding:4px 0;"><span style="color:#8b949e; font-size:12px;">Total Loss</span><span style="color:#f85149; font-weight:700;">${round(sum(t["pnl"] for t in losses),2)}</span></div>
                     </div>
                     """, unsafe_allow_html=True)
 
                 st.markdown("<br>", unsafe_allow_html=True)
-
-                # Trade history table
                 st.markdown('<p class="section-header">Trade History</p>', unsafe_allow_html=True)
-                for t in reversed(trades[-30:]):   # tampil 30 trade terakhir
-                    outcome_color = "#3fb950" if t["outcome"] == "WIN" else "#f85149"
-                    signal_color  = "#3fb950" if t["signal"] == "BUY" else "#f85149"
-                    pnl_sign      = "+" if t["pnl"] >= 0 else ""
+                for t in reversed(trades[-30:]):
+                    oc = "#3fb950" if t["outcome"] == "WIN" else "#f85149"
+                    sc = "#3fb950" if t["signal"]  == "BUY" else "#f85149"
+                    ps = "+" if t["pnl"] >= 0 else ""
                     st.markdown(f"""
                     <div style="display:flex; justify-content:space-between; align-items:center;
                          padding:8px 12px; margin:3px 0; background:#161b22;
                          border:1px solid #30363d; border-radius:6px; font-size:12px;">
                         <span style="color:#8b949e; width:130px;">{t["timestamp"]}</span>
-                        <span style="color:{signal_color}; font-weight:700; width:45px;">{t["signal"]}</span>
-                        <span style="color:#e6edf3; width:80px;">Entry: ${t["entry"]}</span>
-                        <span style="color:#e6edf3; width:80px;">Exit: ${t["exit"]}</span>
+                        <span style="color:{sc}; font-weight:700; width:45px;">{t["signal"]}</span>
+                        <span style="color:#e6edf3; width:90px;">Entry: {t["entry"]:.5f}</span>
+                        <span style="color:#e6edf3; width:90px;">Exit: {t["exit"]:.5f}</span>
                         <span style="color:#8b949e; width:60px;">RR 1:{t["rr"]}</span>
                         <span style="color:#8b949e; width:60px;">Score: {t["score"]}</span>
-                        <span style="color:{outcome_color}; font-weight:700; width:80px;">{t["outcome"]}</span>
-                        <span style="color:{outcome_color}; font-weight:700;">{pnl_sign}{t["pnl"]} USDT</span>
+                        <span style="color:{oc}; font-weight:700; width:60px;">{t["outcome"]}</span>
+                        <span style="color:{oc}; font-weight:700;">{ps}{t["pnl"]}$</span>
                     </div>
                     """, unsafe_allow_html=True)
 
 # ─── TAB 5: SETTINGS ───
 with tab5:
     st.markdown('<p class="section-header">⚙️ Settings</p>', unsafe_allow_html=True)
-
-    st.markdown("**🔄 Auto Refresh**")
-    auto_refresh = st.checkbox("Auto Refresh setiap 30 detik", value=st.session_state["auto_refresh"])
-    st.session_state["auto_refresh"] = auto_refresh
+    auto_refresh = st.checkbox("🔄 Auto Refresh setiap 30 detik", value=st.session_state["auto_refresh_mt5"])
+    st.session_state["auto_refresh_mt5"] = auto_refresh
     if auto_refresh:
-        st.success("✅ Auto refresh aktif — data update tiap 30 detik")
+        st.success("✅ Auto refresh aktif")
     else:
         st.info("ℹ️ Auto refresh nonaktif")
 
     st.markdown("---")
-    st.markdown("**ℹ️ App Info**")
-    st.markdown(f"""
-    <div style="background:#161b22; border:1px solid #30363d; border-radius:8px; padding:16px;">
-        <p style="color:#8b949e; font-size:12px; margin:0;">
-        Version: <span style="color:#e6edf3;">v2.4.2 (AI Reasoning)</span><br>
-        Exchange: <span style="color:#e6edf3;">Binance Spot</span><br>
-        Features: <span style="color:#e6edf3;">Multi-TF · S&R · Stochastic · EMA200</span><br>
-        Status: <span style="color:#3fb950;">🟢 Running (Secure Mode)</span>
-        </p>
-    </div>
-    """, unsafe_allow_html=True)
+    account = mt5.account_info()
+    if account:
+        st.markdown(f"""
+        <div style="background:#161b22; border:1px solid #30363d; border-radius:8px; padding:16px;">
+            <p style="color:#8b949e; font-size:12px; margin:0;">
+            👤 <strong style="color:#e6edf3;">{account.name}</strong><br>
+            🏦 Server: <span style="color:#e6edf3;">{account.server}</span><br>
+            💰 Balance: <span style="color:#3fb950;">${account.balance:,.2f} {account.currency}</span><br>
+            📊 Leverage: <span style="color:#e6edf3;">1:{account.leverage}</span><br>
+            🔗 Status: <span style="color:#3fb950;">🟢 Connected</span><br>
+            Ⓥ Version: <span style="color:#e6edf3;">v2.4.3 (AI Reasoning)</span><br>
+            </p>
+        </div>
+        """, unsafe_allow_html=True)
 
 # ─────────────────────────────────────────────
 #  AUTO REFRESH
 # ─────────────────────────────────────────────
-if st.session_state.get("auto_refresh"):
+if st.session_state.get("auto_refresh_mt5"):
     time.sleep(30)
     st.rerun()
