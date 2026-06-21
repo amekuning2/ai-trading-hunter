@@ -216,7 +216,6 @@ def get_price(symbol, BINANCE_API_KEY, BINANCE_API_SECRET):
             "volume": float(ticker["volume"]),
             "quoteVolume": float(ticker["quoteVolume"]),
         }
-    
     except Exception as e:
         st.error(f"BINANCE ERROR: {type(e).__name__}")
         st.error(str(e))
@@ -418,12 +417,9 @@ def calculate_signal(df, mtf_score_override=None):
         structure_score += 5                        # mid BB
 
     # Jarak ke Support vs Resistance (max 10)
-    # Makin dekat ke support dan jauh dari resistance → lebih bagus buat buy
     if dist_to_support < dist_to_resistance:
-        # Harga lebih dekat support → potensi buy
         structure_score += 8; structure_bias += 1
     elif dist_to_resistance < dist_to_support:
-        # Harga lebih dekat resistance → potensi sell
         structure_score += 2; structure_bias -= 1
     else:
         structure_score += 5
@@ -431,16 +427,13 @@ def calculate_signal(df, mtf_score_override=None):
     structure_score = min(structure_score, 20)
 
     # ── 4. MTF SCORE (0-15) ────────────────────
-    # Jika ada override dari luar (recursive call), pakai itu
-    # Kalau tidak, estimasi dari 4H dan 1D sederhana
     if mtf_score_override is not None:
         mtf_score = max(0, min(mtf_score_override, 15))
     else:
-        # Estimasi MTF dari EMA slope pendekatan sederhana
         ema20_series = ema20.dropna()
         if len(ema20_series) >= 10:
-            slope_short = ema20_series.iloc[-1] - ema20_series.iloc[-5]   # 5 candle slope
-            slope_long  = ema20_series.iloc[-1] - ema20_series.iloc[-10]  # 10 candle slope
+            slope_short = ema20_series.iloc[-1] - ema20_series.iloc[-5]
+            slope_long  = ema20_series.iloc[-1] - ema20_series.iloc[-10]
             if slope_short > 0 and slope_long > 0:
                 mtf_score = 12
             elif slope_short > 0 or slope_long > 0:
@@ -450,27 +443,25 @@ def calculate_signal(df, mtf_score_override=None):
             else:
                 mtf_score = 6
         else:
-            mtf_score = 7  # neutral fallback
+            mtf_score = 7
 
     # ── 5. VOLUME SCORE (0-5) ──────────────────
     volume_score = 0
     if vol_ratio >= 2.0:
-        volume_score = 5   # surge kuat
+        volume_score = 5
     elif vol_ratio >= 1.5:
-        volume_score = 4   # surge moderat
+        volume_score = 4
     elif vol_ratio >= 1.0:
-        volume_score = 3   # di atas rata-rata
+        volume_score = 3
     elif vol_ratio >= 0.7:
         volume_score = 2
     else:
-        volume_score = 1   # volume lemah
+        volume_score = 1
 
     # ── TOTAL SCORE ────────────────────────────
     total_score = trend_score + momentum_score + structure_score + mtf_score + volume_score
-    # total max = 100
 
     # ── BIAS FINAL ─────────────────────────────
-    # Gabungkan bias dari semua kategori (terbobot)
     weighted_bias = (trend_bias * 35) + (momentum_bias * 25) + (structure_bias * 20)
 
     # ── SIGNAL DECISION ────────────────────────
@@ -485,8 +476,6 @@ def calculate_signal(df, mtf_score_override=None):
     else:
         signal = "HOLD"
 
-    # Score mentah memakai skala bullish (tinggi = BUY, rendah = SELL).
-    # Ubah menjadi kekuatan searah bias agar BUY dan SELL dinilai simetris.
     if signal == "BUY":
         confidence = total_score
     elif signal == "SELL":
@@ -503,7 +492,7 @@ def calculate_signal(df, mtf_score_override=None):
         strength = "STRONG" if confidence >= 75 else "MODERATE" if confidence >= 60 else "WEAK"
         reason = f"Market Bias: {signal} — {strength} ({confidence}/100)"
 
-    # ── BADGES (kompatibel UI lama) ─────────────
+    # ── BADGES ─────────────────────────────────
     signals = {}
 
     # RSI badge
@@ -590,15 +579,8 @@ def calculate_signal(df, mtf_score_override=None):
 
 # ─────────────────────────────────────────────
 #  TRADE DECISION ENGINE
-#  Input  : signal, score_detail, df, supports, resistances
-#  Output : decision ("ENTER"|"WAIT"|"SKIP"), reason, color
 # ─────────────────────────────────────────────
-def calculate_trade_decision(signal, score_detail, df, supports, resistances):
-    """
-    ENTER : semua syarat terpenuhi, setup bagus, masuk sekarang
-    WAIT  : sinyal ada tapi salah satu syarat belum ideal
-    SKIP  : kondisi jelek / RR buruk / sinyal HOLD
-    """
+def calculate_trade_decision(signal, score_detail, df, supports, resistances, trading_mode="Ketat"):
     if signal == "HOLD":
         return "SKIP", "Sinyal HOLD — tidak ada setup", "#8b949e"
 
@@ -609,6 +591,10 @@ def calculate_trade_decision(signal, score_detail, df, supports, resistances):
     structure   = score_detail["structure"] if is_buy else score_detail["structure_max"] - score_detail["structure"]
     mtf         = score_detail["mtf"] if is_buy else score_detail["mtf_max"] - score_detail["mtf"]
 
+    is_scalping = trading_mode == "Scalping"
+    sl_mult = 0.8 if is_scalping else 1.5
+    tp_mult = 0.7 if is_scalping else 2.0
+
     # ── ATR & RR check ─────────────────────────
     try:
         atr = ta.volatility.AverageTrueRange(
@@ -617,90 +603,89 @@ def calculate_trade_decision(signal, score_detail, df, supports, resistances):
         current_price = df["close"].iloc[-1]
 
         if signal == "BUY":
-            sl_price  = current_price - (atr * 1.5)
-            tp1_price = current_price + (atr * 2.0)
+            sl_price  = current_price - (atr * sl_mult)
+            tp1_price = current_price + (atr * tp_mult)
         else:
-            sl_price  = current_price + (atr * 1.5)
-            tp1_price = current_price - (atr * 2.0)
+            sl_price  = current_price + (atr * sl_mult)
+            tp1_price = current_price - (atr * tp_mult)
 
         sl_dist  = abs(current_price - sl_price)
         tp_dist  = abs(tp1_price - current_price)
         rr_ratio = tp_dist / sl_dist if sl_dist > 0 else 0
-
     except Exception:
         rr_ratio = 0
 
-    # ── Structure: harga dekat S/R yang tepat? ─
+    # ── Structure S/R Check ───────────────────
     structure_ok = False
     if signal == "BUY" and supports:
         dist_pct = abs(current_price - supports[0]) / current_price * 100
-        structure_ok = dist_pct <= 1.5   # harga dalam 1.5% dari support
+        structure_ok = dist_pct <= 1.5
     elif signal == "SELL" and resistances:
         dist_pct = abs(resistances[0] - current_price) / current_price * 100
-        structure_ok = dist_pct <= 1.5   # harga dalam 1.5% dari resistance
+        structure_ok = dist_pct <= 1.5
     else:
-        structure_ok = structure >= 12   # fallback: structure score cukup
+        structure_ok = structure >= 12
 
-    # ── Decision logic ─────────────────────────
+    # ── Decision Logic ─────────────────────────
     reasons_wait = []
 
-    if total < 50:
+    min_score = 52 if is_scalping else 50
+    min_rr = 0.70 if is_scalping else 1.0
+    trend_min = 10 if is_scalping else 15
+    momentum_min = 8 if is_scalping else 12
+    mtf_min = 4 if is_scalping else 6
+
+    if total < min_score:
         return "SKIP", f"Score terlalu rendah ({total}/100) — jangan masuk", "#f85149"
 
-    if rr_ratio < 1.0:
+    if rr_ratio < min_rr:
         return "SKIP", f"RR {rr_ratio:.2f} — reward tidak sepadan risiko", "#f85149"
 
-    if trend < 15:
+    if trend < trend_min:
         reasons_wait.append("trend lemah")
 
-    if momentum < 12:
+    if momentum < momentum_min:
         reasons_wait.append("momentum belum konfirmasi")
 
-    if rr_ratio < 1.5:
+    if not is_scalping and rr_ratio < 1.5:
         reasons_wait.append(f"RR {rr_ratio:.2f} masih marginal")
 
-    if mtf < 6:
+    if mtf < mtf_min:
         reasons_wait.append("MTF belum searah")
 
-    if not structure_ok:
+    if not structure_ok and (not is_scalping or structure < 7):
         reasons_wait.append("belum di zona S/R ideal")
 
-    # ENTER: semua bersih
-    if not reasons_wait and total >= 60 and rr_ratio >= 1.5:
-        return "ENTER", f"Setup solid — Score {total}/100, RR 1:{rr_ratio:.1f}", "#3fb950"
+    enter_score = 55 if is_scalping else 60
+    enter_rr = 0.70 if is_scalping else 1.5
 
-    # WAIT: ada catatan tapi masih layak dipantau
+    if not reasons_wait and total >= enter_score and rr_ratio >= enter_rr:
+        mode_note = "Scalp aktif" if is_scalping else "Setup solid"
+        return "ENTER", f"{mode_note} — Score {total}/100, RR 1:{rr_ratio:.2f}", "#3fb950"
+
     if reasons_wait:
-        note = ", ".join(reasons_wait[:2])   # max 2 alasan di UI
+        note = ", ".join(reasons_wait[:2])
         return "WAIT", f"Tunggu: {note}", "#f0883e"
 
-    # Default fallback ENTER jika lolos semua threshold
     return "ENTER", f"Setup cukup — Score {total}/100, RR 1:{rr_ratio:.1f}", "#3fb950"
 
 # ─────────────────────────────────────────────
-#  MULTI TIMEFRAME ANALYSIS
-# ─────────────────────────────────────────────
-# ─────────────────────────────────────────────
 #  REAL MTF SCORE ENGINE
-#  Fetch 1H / 4H / 1D → score per TF → total 0-15
-#  Bobot: 1D=7, 4H=5, 1H=3
 # ─────────────────────────────────────────────
-def calculate_mtf_score(symbol, current_tf, BINANCE_API_KEY, BINANCE_API_SECRET):
+def calculate_mtf_score(symbol, current_tf, BINANCE_API_KEY, BINANCE_API_SECRET, trading_mode="Ketat"):
     """
     Hitung MTF score berdasarkan EMA trend alignment di 3 timeframe.
     current_tf dikecualikan dari scoring supaya tidak double-count.
-    Returns: int 0-15
     """
-    tf_config = [
-        ("1h",  "1H", 3),   # bobot 3
-        ("4h",  "4H", 5),   # bobot 5
-        ("1d",  "1D", 7),   # bobot 7
-    ]
+    tf_config = (
+        [("5m", "5M", 3), ("15m", "15M", 5), ("1h", "1H", 7)]
+        if trading_mode == "Scalping"
+        else [("1h", "1H", 3), ("4h", "4H", 5), ("1d", "1D", 7)]
+    )
     total_weight = 0
     total_score  = 0
 
     for interval, label, weight in tf_config:
-        # Skip timeframe yang sedang aktif (sudah dihitung di signal utama)
         if label == current_tf:
             continue
 
@@ -715,28 +700,25 @@ def calculate_mtf_score(symbol, current_tf, BINANCE_API_KEY, BINANCE_API_SECRET)
                     if len(close_tf) >= 200 else ema50_tf
         price_tf = close_tf.iloc[-1]
 
-        # Scoring per TF: 0.0 sampai 1.0
         if ema20_tf > ema50_tf > ema200_tf and price_tf > ema50_tf:
-            tf_score = 1.0    # full bullish alignment
+            tf_score = 1.0
         elif ema20_tf < ema50_tf < ema200_tf and price_tf < ema50_tf:
-            tf_score = 0.0    # full bearish alignment
+            tf_score = 0.0
         elif ema20_tf > ema50_tf and price_tf > ema50_tf:
-            tf_score = 0.75   # bullish tapi EMA200 belum align
+            tf_score = 0.75
         elif ema20_tf < ema50_tf and price_tf < ema50_tf:
-            tf_score = 0.25   # bearish tapi EMA200 belum align
+            tf_score = 0.25
         else:
-            tf_score = 0.5    # neutral / mixed
+            tf_score = 0.5
 
         total_score  += tf_score * weight
         total_weight += weight
 
     if total_weight == 0:
-        return 7  # fallback neutral
+        return 7
 
-    # Normalize ke 0-15
     normalized = (total_score / total_weight) * 15
     return round(normalized)
-
 
 def multi_timeframe_analysis(symbol, BINANCE_API_KEY, BINANCE_API_SECRET):
     timeframes = [("1H", "1h", 100), ("4H", "4h", 100), ("1D", "1d", 200)]
@@ -770,7 +752,7 @@ def get_support_resistance(df, n=3):
 # ─────────────────────────────────────────────
 #  TRADING PLAN GENERATOR
 # ─────────────────────────────────────────────
-def generate_trading_plan(df, price_data, signal, supports, resistances, modal_usdt=100):
+def generate_trading_plan(df, price_data, signal, supports, resistances, modal_usdt=100, trading_mode="Ketat"):
     current_price = price_data["price"]
 
     if df is None or len(df) < 20:
@@ -778,16 +760,21 @@ def generate_trading_plan(df, price_data, signal, supports, resistances, modal_u
 
     atr = ta.volatility.AverageTrueRange(df["high"], df["low"], df["close"], window=14).average_true_range().iloc[-1]
 
+    if trading_mode == "Scalping":
+        sl_mult, tp1_mult, tp2_mult, tp3_mult = 0.8, 0.7, 1.0, 1.4
+        min_tp_pct, tp_step_pct, min_sl_pct = 0.0005, 0.0005, 0.0015
+    else:
+        sl_mult, tp1_mult, tp2_mult, tp3_mult = 1.5, 2.0, 3.5, 5.0
+        min_tp_pct, tp_step_pct, min_sl_pct = 0.001, 0.002, 0.005
+
     if signal == "BUY":
         entry = round(current_price, 4)
-        # SL: ATR-based, diperkuat oleh support terdekat
-        sl_atr  = round(entry - (atr * 1.5), 4)
+        sl_atr  = round(entry - (atr * sl_mult), 4)
         sl_sr   = round(supports[0] * 0.998, 4) if supports else sl_atr
-        sl      = min(sl_atr, sl_sr)           # ambil yang lebih jauh (proteksi lebih)
-        # TP: ATR-based, dihalangi resistance
-        tp1_atr = round(entry + (atr * 2.0), 4)
-        tp2_atr = round(entry + (atr * 3.5), 4)
-        tp3_atr = round(entry + (atr * 5.0), 4)
+        sl      = sl_atr if trading_mode == "Scalping" else min(sl_atr, sl_sr)
+        tp1_atr = round(entry + (atr * tp1_mult), 4)
+        tp2_atr = round(entry + (atr * tp2_mult), 4)
+        tp3_atr = round(entry + (atr * tp3_mult), 4)
         if resistances:
             r1 = round(resistances[0] * 0.999, 4)
             tp1 = min(tp1_atr, r1) if r1 > entry else tp1_atr
@@ -795,20 +782,19 @@ def generate_trading_plan(df, price_data, signal, supports, resistances, modal_u
             tp1 = tp1_atr
         tp2 = tp2_atr
         tp3 = tp3_atr
-        # Safety: pastikan urutan tp1 < tp2 < tp3
-        tp1 = max(tp1, round(entry * 1.001, 4))
-        tp2 = max(tp2, round(tp1  * 1.002, 4))
-        tp3 = max(tp3, round(tp2  * 1.002, 4))
-        sl  = min(sl,  round(entry * 0.995, 4))
+        tp1 = max(tp1, round(entry * (1 + min_tp_pct), 4))
+        tp2 = max(tp2, round(tp1  * (1 + tp_step_pct), 4))
+        tp3 = max(tp3, round(tp2  * (1 + tp_step_pct), 4))
+        sl  = min(sl,  round(entry * (1 - min_sl_pct), 4))
 
     elif signal == "SELL":
         entry = round(current_price, 4)
-        sl_atr  = round(entry + (atr * 1.5), 4)
+        sl_atr  = round(entry + (atr * sl_mult), 4)
         sl_sr   = round(resistances[0] * 1.002, 4) if resistances else sl_atr
-        sl      = max(sl_atr, sl_sr)
-        tp1_atr = round(entry - (atr * 2.0), 4)
-        tp2_atr = round(entry - (atr * 3.5), 4)
-        tp3_atr = round(entry - (atr * 5.0), 4)
+        sl      = sl_atr if trading_mode == "Scalping" else max(sl_atr, sl_sr)
+        tp1_atr = round(entry - (atr * tp1_mult), 4)
+        tp2_atr = round(entry - (atr * tp2_mult), 4)
+        tp3_atr = round(entry - (atr * tp3_mult), 4)
         if supports:
             s1 = round(supports[0] * 1.001, 4)
             tp1 = max(tp1_atr, s1) if s1 < entry else tp1_atr
@@ -816,10 +802,10 @@ def generate_trading_plan(df, price_data, signal, supports, resistances, modal_u
             tp1 = tp1_atr
         tp2 = tp2_atr
         tp3 = tp3_atr
-        tp1 = min(tp1, round(entry * 0.999, 4))
-        tp2 = min(tp2, round(tp1  * 0.998, 4))
-        tp3 = min(tp3, round(tp2  * 0.998, 4))
-        sl  = max(sl,  round(entry * 1.005, 4))
+        tp1 = min(tp1, round(entry * (1 - min_tp_pct), 4))
+        tp2 = min(tp2, round(tp1  * (1 - tp_step_pct), 4))
+        tp3 = min(tp3, round(tp2  * (1 - tp_step_pct), 4))
+        sl  = max(sl,  round(entry * (1 + min_sl_pct), 4))
     else:
         return None
 
@@ -864,12 +850,9 @@ def generate_trading_plan(df, price_data, signal, supports, resistances, modal_u
     }
 
 # ─────────────────────────────────────────────
-#  AI REASONING ENGINE — Phase 4A.6
-#  Mengubah score_detail + decision jadi narasi penjelasan
-#  Input  : signal, decision, decision_reason, score_detail, indicators, supports, resistances
-#  Output : (points: list[str], conclusion: str, conclusion_color: str)
+#  AI REASONING ENGINE
 # ─────────────────────────────────────────────
-def generate_ai_reasoning(signal, decision, decision_reason, score_detail, indicators, supports, resistances):
+def generate_ai_reasoning(signal, decision, decision_reason, score_detail, indicators, supports, resistances, trading_mode="Ketat"):
     if signal == "HOLD":
         points = [
             "Tidak ada bias arah yang cukup jelas dari kombinasi Trend, Momentum, dan Structure saat ini.",
@@ -890,7 +873,6 @@ def generate_ai_reasoning(signal, decision, decision_reason, score_detail, indic
 
     def cat_pct(score, max_score):
         raw_pct = (score / max_score * 100) if max_score else 0
-        # Score tinggi = bullish, score rendah = bearish (sesuai desain Signal Engine v2)
         return raw_pct if is_buy else (100 - raw_pct)
 
     trend_pct     = cat_pct(score_detail["trend"],     score_detail["trend_max"])
@@ -916,7 +898,8 @@ def generate_ai_reasoning(signal, decision, decision_reason, score_detail, indic
 
     # MTF
     if mtf_pct >= 70:
-        mtf_text = "Multi-timeframe (1H/4H/1D) searah penuh, jadi konfirmasi cukup kuat."
+        mtf_label = "5M/15M/1H" if trading_mode == "Scalping" else "1H/4H/1D"
+        mtf_text = f"Multi-timeframe ({mtf_label}) searah penuh, jadi konfirmasi cukup kuat."
     elif mtf_pct >= 45:
         mtf_text = "Multi-timeframe sebagian searah, masih ada timeframe yang belum konfirmasi."
     else:
@@ -944,6 +927,9 @@ def generate_ai_reasoning(signal, decision, decision_reason, score_detail, indic
 
     return points, conclusion, color
 
+# ─────────────────────────────────────────────
+#  CHART GENERATOR
+# ─────────────────────────────────────────────
 def build_chart(df, symbol, resistances=[], supports=[]):
     fig = make_subplots(
         rows=3, cols=1,
@@ -1047,13 +1033,20 @@ tab1, tab2, tab3, tab4, tab5 = st.tabs(["📊 Dashboard", "🕐 Multi-Timeframe"
 
 # ─── TAB 1: DASHBOARD ───
 with tab1:
+    trading_mode = st.selectbox(
+        "🎯 Trading Mode",
+        ["Scalping", "Ketat"],
+        format_func=lambda mode: "⚡ Scalping — entry & TP cepat" if mode == "Scalping" else "🛡️ Ketat — seleksi maksimum",
+        help="Scalping memakai M5/M15/H1 dan target ATR pendek. Ketat memakai H1/H4/D1 dan RR lebih besar.",
+    )
+
     # Chart settings inline
     col_tf, col_candle = st.columns([2,1])
     with col_tf:
         interval = st.selectbox("⏱ Timeframe", [
             ("1 Minute","1m"),("5 Minutes","5m"),("15 Minutes","15m"),
             ("1 Hour","1h"),("4 Hours","4h"),("1 Day","1d")
-        ], format_func=lambda x: x[0], index=3)
+        ], format_func=lambda x: x[0], index=2 if trading_mode == "Scalping" else 3)
         interval_val = interval[1]
     with col_candle:
         candles = st.slider("Candles", 50, 500, 200)
@@ -1103,12 +1096,11 @@ with tab1:
         vol_m = price_data["quoteVolume"] / 1_000_000
         st.metric("Volume (USDT)", f"${vol_m:,.1f}M")
     with col4:
-        st.metric("24h Change", f"{change:+.2f}%",
-                  delta=f"{'Up' if change >= 0 else 'Down'}")
+        st.metric("24h Change", f"{change:+.2f}%", delta=f"{'Up' if change >= 0 else 'Down'}")
 
     st.markdown("---")
 
-    # Chart + Signal
+    # Chart + Signal Area
     col_chart, col_signal = st.columns([3, 1])
 
     with col_chart:
@@ -1121,30 +1113,28 @@ with tab1:
         else:
             st.error("Gagal load chart data")
 
-        # Filled after signal calculation, but rendered directly below the chart.
+        # Trading Plan Container (Tepat di bawah Chart)
         trading_plan_container = st.container()
 
     with col_signal:
         st.markdown('<p class="section-header">AI Signal</p>', unsafe_allow_html=True)
 
         if df is not None:
-            # Map interval_val ke label TF untuk exclude dari MTF scoring
             tf_label_map = {"1m":"1M","5m":"5M","15m":"15M","1h":"1H","4h":"4H","1d":"1D"}
             current_tf_label = tf_label_map.get(interval_val, "1H")
 
-            # Hitung MTF score real dari TF lain (1H/4H/1D)
-            mtf_real = calculate_mtf_score(symbol, current_tf_label, BINANCE_API_KEY, BINANCE_API_SECRET)
+            # Hitung Real MTF Score
+            mtf_real = calculate_mtf_score(symbol, current_tf_label, BINANCE_API_KEY, BINANCE_API_SECRET, trading_mode)
 
             signal, reason, signals, indicators, confidence, score_detail = calculate_signal(df, mtf_score_override=mtf_real)
             decision, decision_reason, decision_color = calculate_trade_decision(
-                signal, score_detail, df, supports, resistances
+                signal, score_detail, df, supports, resistances, trading_mode
             )
 
             signal_class = f"signal-{signal.lower()}"
             signal_emoji = "🟢" if signal == "BUY" else "🔴" if signal == "SELL" else "🔵"
             strength_color = "#3fb950" if signal == "BUY" else "#f85149" if signal == "SELL" else "#388bfd"
 
-            # Decision badge styling
             decision_emoji = "🟢" if decision == "ENTER" else "🟡" if decision == "WAIT" else "🔴"
             decision_bg    = "rgba(63,185,80,0.12)"  if decision == "ENTER" else \
                              "rgba(240,136,62,0.12)" if decision == "WAIT"  else \
@@ -1175,8 +1165,7 @@ with tab1:
             </div>
             """, unsafe_allow_html=True)
 
-            # Filled after the analysis blocks are prepared, but rendered here so
-            # the explanation stays directly below the signal card.
+            # AI Reasoning Container (Tepat di bawah Signal)
             reasoning_container = st.container()
 
             # ── Score Breakdown ──────────────────
@@ -1212,6 +1201,7 @@ with tab1:
             </div>
             """, unsafe_allow_html=True)
 
+            # Indicators & Values
             st.markdown("<br>", unsafe_allow_html=True)
             st.markdown('<p class="section-header">Indicators</p>', unsafe_allow_html=True)
 
@@ -1243,7 +1233,7 @@ with tab1:
             for s in supports:
                 st.markdown(f'<div class="sr-level sr-support"><span style="color:#8b949e;">Support</span><span style="color:#3fb950; font-weight:700;">${s:,.4f}</span></div>', unsafe_allow_html=True)
 
-    # Trading Plan — rendered in the left column below Price Chart
+    # Trading Plan — Rendered under Price Chart on the Left Column
     with trading_plan_container:
         st.markdown("---")
         st.markdown('<p class="section-header">📋 Trading Plan</p>', unsafe_allow_html=True)
@@ -1251,10 +1241,12 @@ with tab1:
         modal = st.number_input("💵 Modal (USDT)", min_value=1.0, value=100.0, step=10.0, format="%.2f")
     
         if df is not None and price_data is not None and decision == "ENTER":
-            plan = generate_trading_plan(df, price_data, signal, supports, resistances, modal_usdt=modal)
+            plan = generate_trading_plan(df, price_data, signal, supports, resistances, modal_usdt=modal, trading_mode=trading_mode)
     
             if plan:
-                rr_color = "#3fb950" if plan["rr_ratio"] >= 1.5 else "#f0883e" if plan["rr_ratio"] >= 1 else "#f85149"
+                rr_target = 0.7 if trading_mode == "Scalping" else 1.5
+                rr_marginal = 0.6 if trading_mode == "Scalping" else 1.0
+                rr_color = "#3fb950" if plan["rr_ratio"] >= rr_target else "#f0883e" if plan["rr_ratio"] >= rr_marginal else "#f85149"
                 action_color = "#3fb950" if plan["signal"] == "BUY" else "#f85149"
                 action_emoji = "🟢" if plan["signal"] == "BUY" else "🔴"
     
@@ -1336,7 +1328,7 @@ with tab1:
                         </div>
                         <div class="tp-row">
                             <span class="tp-label">Worth it?</span>
-                            <span class="tp-value" style="color:{rr_color};">{"✅ YES" if plan["rr_ratio"] >= 1.5 else "⚠️ MARGINAL" if plan["rr_ratio"] >= 1 else "❌ NO"}</span>
+                            <span class="tp-value" style="color:{rr_color};">{"✅ YES" if plan["rr_ratio"] >= rr_target else "⚠️ MARGINAL" if plan["rr_ratio"] >= rr_marginal else "❌ NO"}</span>
                         </div>
                     </div>
                     """, unsafe_allow_html=True)
@@ -1350,21 +1342,20 @@ with tab1:
                     Take profit sebagian di TP1 <strong style="color:#3fb950;">${plan["tp1"]:,.4f}</strong>,
                     sisanya di TP2 <strong style="color:#3fb950;">${plan["tp2"]:,.4f}</strong>.
                     R/R ratio <strong style="color:{rr_color};">1:{plan["rr_ratio"]}</strong>
-                    {"— trade ini worth it! ✅" if plan["rr_ratio"] >= 1.5 else "— pertimbangkan ulang ⚠️" if plan["rr_ratio"] >= 1 else "— skip trade ini ❌"}
+                    {"— trade ini worth it! ✅" if plan["rr_ratio"] >= rr_target else "— pertimbangkan ulang ⚠️" if plan["rr_ratio"] >= rr_marginal else "— skip trade ini ❌"}
                     </p>
                 </div>
                 """, unsafe_allow_html=True)
-    
             else:
                 st.info("⏳ Sinyal HOLD — Trading plan tidak tersedia. Tunggu sinyal BUY/SELL yang lebih jelas.")
         elif df is not None and price_data is not None:
             st.warning(f"Trading Plan dikunci — keputusan AI: {decision}. {decision_reason}")
     
-    # AI Reasoning — rendered in the right column below AI Signal
+    # AI Reasoning — Rendered under AI Signal on the Right Column
     if df is not None and price_data is not None:
         with reasoning_container:
             reasoning_points, reasoning_conclusion, reasoning_color = generate_ai_reasoning(
-                signal, decision, decision_reason, score_detail, indicators, supports, resistances
+                signal, decision, decision_reason, score_detail, indicators, supports, resistances, trading_mode
             )
     
             st.markdown("---")
@@ -1385,7 +1376,7 @@ with tab1:
                 </p>
             </div>
             """, unsafe_allow_html=True)
-    
+
 # ─── TAB 2: MULTI TIMEFRAME ───
 with tab2:
     st.markdown('<p class="section-header">🕐 Multi-Timeframe Analysis</p>', unsafe_allow_html=True)
@@ -1490,7 +1481,7 @@ with tab4:
     with col_bt1:
         bt_symbol = st.text_input("Symbol", value=symbol)
     with col_bt2:
-        bt_interval = st.selectbox("Timeframe", [
+        bt_interval = st.selectbox("Backtest Timeframe", [
             ("1 Hour", "1h"), ("4 Hours", "4h"), ("1 Day", "1d")
         ], format_func=lambda x: x[0], index=0)
         bt_interval_val = bt_interval[1]
@@ -1506,9 +1497,8 @@ with tab4:
         if df_bt is None or len(df_bt) < 100:
             st.error("Data tidak cukup untuk backtest. Coba tambah jumlah candles.")
         else:
-            # ── Run backtest ──────────────────────────
             trades      = []
-            min_window  = 50   # butuh minimal 50 candle untuk indikator
+            min_window  = 50
 
             for i in range(min_window, len(df_bt) - 1):
                 df_slice = df_bt.iloc[:i+1].copy()
@@ -1527,13 +1517,10 @@ with tab4:
                 if signal_bt == "BUY":
                     sl_bt  = entry_price - (atr_bt * 1.5)
                     tp1_bt = entry_price + (atr_bt * 2.0)
-                    tp2_bt = entry_price + (atr_bt * 3.5)
                 else:
                     sl_bt  = entry_price + (atr_bt * 1.5)
                     tp1_bt = entry_price - (atr_bt * 2.0)
-                    tp2_bt = entry_price - (atr_bt * 3.5)
 
-                # Simulasi: cek 10 candle ke depan
                 outcome    = "OPEN"
                 exit_price = None
                 exit_candle = None
@@ -1569,7 +1556,7 @@ with tab4:
                 if outcome == "OPEN":
                     continue
 
-                qty         = bt_modal / entry_price
+                qty = bt_modal / entry_price
                 if signal_bt == "BUY":
                     pnl = (exit_price - entry_price) * qty
                 else:
@@ -1592,7 +1579,6 @@ with tab4:
                     "exit_candle": exit_candle,
                 })
 
-            # ── Summary ───────────────────────────────
             if not trades:
                 st.warning("Tidak ada trade yang tereksekusi. Coba kurangi threshold score atau tambah candles.")
             else:
@@ -1609,7 +1595,6 @@ with tab4:
                 pnl_color  = "#3fb950" if total_pnl >= 0 else "#f85149"
                 wr_color   = "#3fb950" if win_rate >= 55 else "#f0883e" if win_rate >= 45 else "#f85149"
 
-                # Summary cards
                 st.markdown("<br>", unsafe_allow_html=True)
                 c1, c2, c3, c4, c5 = st.columns(5)
                 metrics = [
@@ -1630,7 +1615,6 @@ with tab4:
 
                 st.markdown("<br>", unsafe_allow_html=True)
 
-                # Win/Loss breakdown
                 col_wl1, col_wl2 = st.columns(2)
                 with col_wl1:
                     st.markdown(f"""
@@ -1671,9 +1655,8 @@ with tab4:
 
                 st.markdown("<br>", unsafe_allow_html=True)
 
-                # Trade history table
                 st.markdown('<p class="section-header">Trade History</p>', unsafe_allow_html=True)
-                for t in reversed(trades[-30:]):   # tampil 30 trade terakhir
+                for t in reversed(trades[-30:]):
                     outcome_color = "#3fb950" if t["outcome"] == "WIN" else "#f85149"
                     signal_color  = "#3fb950" if t["signal"] == "BUY" else "#f85149"
                     pnl_sign      = "+" if t["pnl"] >= 0 else ""
@@ -1709,9 +1692,9 @@ with tab5:
     st.markdown(f"""
     <div style="background:#161b22; border:1px solid #30363d; border-radius:8px; padding:16px;">
         <p style="color:#8b949e; font-size:12px; margin:0;">
-        Version: <span style="color:#e6edf3;">v2.4.2 (AI Reasoning)</span><br>
+        Version: <span style="color:#e6edf3;">v2.6.0 (Dual Mode Integration)</span><br>
         Exchange: <span style="color:#e6edf3;">Binance Spot</span><br>
-        Features: <span style="color:#e6edf3;">Multi-TF · S&R · Stochastic · EMA200</span><br>
+        Features: <span style="color:#e6edf3;">Dual Mode (Scalping & Strict) · Multi-TF · S&R · Stochastic · EMA200</span><br>
         Status: <span style="color:#3fb950;">🟢 Running (Secure Mode)</span>
         </p>
     </div>
