@@ -416,7 +416,7 @@ def execute_hybrid_engine(df, symbol, interval, trading_mode, resistances, suppo
     """
 
     try:
-        model = genai.GenerativeModel("gemini-1.5-flash")
+        model = genai.GenerativeModel("gemini-3.1-flash-lite")
         response = model.generate_content(
             prompt,
             generation_config={"response_mime_type": "application/json"}
