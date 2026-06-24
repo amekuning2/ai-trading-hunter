@@ -1146,8 +1146,7 @@ with tab1:
             if GEMINI_ENABLED and df is not None:
                 st.markdown("---")
                 st.markdown('<p class="section-header">✨ Gemini AI Insights</p>', unsafe_allow_html=True)
-                with st.spinner("Gemini sedang menganalisis..."):
-                    gemini_data = get_gemini_insights(
+                gemini_data = get_gemini_insights(
                         symbol=symbol,
                         interval=interval_val,
                         trading_mode=trading_mode,
@@ -1182,8 +1181,7 @@ with tab2:
     st.markdown('<p class="section-header">🕐 Multi-Timeframe Analysis</p>', unsafe_allow_html=True)
     st.markdown(f"<p style='color:#8b949e; font-size:13px;'>Analisis {symbol} dari 3 timeframe sekaligus</p>", unsafe_allow_html=True)
 
-    with st.spinner("Menganalisis semua timeframe..."):
-        mtf_results = multi_timeframe_analysis(symbol, BINANCE_API_KEY, BINANCE_API_SECRET)
+    mtf_results = multi_timeframe_analysis(symbol, BINANCE_API_KEY, BINANCE_API_SECRET)
 
     buy_count  = sum(1 for _, s, _, _ in mtf_results if s == "BUY")
     sell_count = sum(1 for _, s, _, _ in mtf_results if s == "SELL")
@@ -1285,8 +1283,7 @@ with tab4:
     bt_modal = st.number_input("💵 Modal per Trade (USDT)", min_value=1.0, value=10.0, step=5.0)
 
     if st.button("▶️ Jalankan Backtest", use_container_width=True):
-        with st.spinner("Mengambil data historis dan menjalankan simulasi..."):
-            df_bt = get_klines(bt_symbol, bt_interval_val, bt_candles, BINANCE_API_KEY, BINANCE_API_SECRET)
+        df_bt = get_klines(bt_symbol, bt_interval_val, bt_candles, BINANCE_API_KEY, BINANCE_API_SECRET)
 
         if df_bt is None or len(df_bt) < 100:
             st.error("Data tidak cukup untuk backtest. Coba tambah jumlah candles.")
@@ -1439,7 +1436,7 @@ with tab5:
     st.markdown(f"""
     <div style="background:#161b22; border:1px solid #30363d; border-radius:8px; padding:16px;">
         <p style="color:#8b949e; font-size:12px; margin:0;">
-        Version: <span style="color:#e6edf3;">v2.9.0 (Hybrid — v2.6 Base + Gemini Enhancement Layer)</span><br>
+        Version: <span style="color:#e6edf3;">v2.9.5 (Hybrid — v2.6 Base + Gemini Enhancement Layer)</span><br>
         Exchange: <span style="color:#e6edf3;">Binance Spot</span><br>
         Features: <span style="color:#e6edf3;">Dual Mode (Scalping & Ketat) · Real MTF Score · S&R · Stochastic · EMA200 · Trading Plan · Backtesting · Top Gainers</span><br>
         Gemini AI: <span style="color:#e6edf3;">{gemini_status}</span><br>
