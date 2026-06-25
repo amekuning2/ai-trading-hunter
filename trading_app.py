@@ -807,7 +807,7 @@ Target: konsisten profit kecil, bukan FOMO besar.
 Balas HANYA dalam format JSON:
 {{"insights": ["poin1", "poin2", "poin3"], "kesimpulan": "teks kesimpulan singkat"}}
 """
-        model    = genai.GenerativeModel("gemini-1.5-flash")
+        model    = genai.GenerativeModel("gemini-3.1-flash-lite")
         response = model.generate_content(prompt, generation_config={"response_mime_type": "application/json"})
         data     = json.loads(response.text.strip())
         return data
