@@ -771,48 +771,96 @@ def generate_ai_reasoning(signal, decision, decision_reason, score_detail, indic
     return points, conclusion, color
 
 # ─────────────────────────────────────────────
-#  GEMINI AI LAYER (Enhancement, bukan pengganti)
+#  GEMINI AI DECISION ENGINE
+#  Enhancement layer: bisa override WAIT→ENTER untuk peluang mikro
+#  Safety rule: tidak bisa override SKIP (score terlalu rendah)
 # ─────────────────────────────────────────────
 @st.cache_data(ttl=120)
-def get_gemini_insights(symbol, interval, trading_mode, signal, decision, score_total,
+def get_gemini_decision(symbol, interval, trading_mode, signal, formula_decision, score_total,
                         rsi, macd_val, ema20, ema50, current_price,
                         supports_str, resistances_str, mtf_context_str, GEMINI_API_KEY,
                         market_type="Spot", leverage=1):
+    """
+    Return dict:
+      insights        : list[str]  — poin analisis
+      kesimpulan      : str        — ringkasan AI
+      ai_decision     : ENTER/WAIT/SKIP — keputusan final AI
+      ai_reason       : str        — alasan AI
+      is_override     : bool       — apakah AI override rumus
+    """
+    fallback = {
+        "insights": [], "kesimpulan": "",
+        "ai_decision": formula_decision, "ai_reason": "",
+        "is_override": False
+    }
     if not GEMINI_API_KEY:
-        return None
+        return fallback
+
     try:
-        futures_note = f"""
-- Market Type: FUTURES (Leverage {leverage}x)
-- Di Futures, sinyal BUY = posisi LONG, sinyal SELL = posisi SHORT (keduanya valid)
-- Hitung potensi profit/loss dengan pengali leverage {leverage}x
-""" if market_type == "Futures" else "- Market Type: SPOT (hanya BUY/HOLD yang valid)"
+        # Aturan override yang boleh dilakukan AI
+        if trading_mode == "Scalping":
+            override_rule = """ATURAN OVERRIDE (Scalping Mode — Agresif):
+- Jika formula bilang WAIT tapi kamu melihat peluang mikro yang valid → boleh override ke ENTER
+- Jika formula bilang SKIP tapi score >= 48 dan ada momentum kuat → boleh override ke WAIT
+- Jika formula bilang SKIP dan score < 48 → WAJIB ikut SKIP, jangan override"""
+        else:
+            override_rule = """ATURAN OVERRIDE (Mode Ketat — Fleksibel tapi selektif):
+- Jika formula bilang WAIT tapi ada konfluens kuat (harga di support + volume surge + MTF searah) → boleh override ke ENTER
+- Jika formula bilang SKIP tapi score >= 52 dan setup terlihat sangat solid → boleh override ke WAIT
+- Jika formula bilang SKIP dan score < 52 → WAJIB ikut SKIP, jangan pernah override ke ENTER langsung"""
+
+        futures_ctx = f"Market: FUTURES {leverage}x — SHORT (SELL) valid selain LONG (BUY)" if market_type == "Futures" else "Market: SPOT — hanya BUY/HOLD valid"
 
         prompt = f"""
-Kamu adalah analis trading profesional yang membantu trader retail Indonesia.
-Berikan 3 poin insight singkat dan 1 kesimpulan dalam Bahasa Indonesia yang santai tapi informatif.
+Kamu adalah Decision Engine AI untuk sistem trading hybrid.
+Rumus matematika sudah menghasilkan data presisi, tugasmu adalah memberikan interpretasi kontekstual dan memutuskan apakah keputusan rumus perlu di-override untuk menangkap peluang mikro.
 
-Data market:
-- Symbol: {symbol}, Timeframe: {interval}, Mode: {trading_mode}
-- Signal Engine: {signal}, Decision: {decision}, Score: {score_total}/100
-- RSI: {rsi}, MACD: {macd_val}, EMA20: {ema20}, EMA50: {ema50}
-- Harga saat ini: {current_price}
-- Support levels: {supports_str}
-- Resistance levels: {resistances_str}
-- MTF bias: {mtf_context_str}
-{futures_note}
+DATA TEKNIKAL DARI RUMUS:
+- Symbol: {symbol} | TF: {interval} | Mode: {trading_mode}
+- Signal Rumus: {signal} | Keputusan Rumus: {formula_decision} | Score: {score_total}/100
+- RSI: {rsi} | MACD: {macd_val} | EMA20: {ema20} | EMA50: {ema50}
+- Harga: {current_price} | Support: {supports_str} | Resistance: {resistances_str}
+- MTF: {mtf_context_str} | {futures_ctx}
 
-Fokus pada: apakah setup ini worth it untuk diambil trader dengan modal kecil?
-Target: konsisten profit kecil, bukan FOMO besar.
+TARGET USER: Profit konsisten minimal $5/hari dengan modal kecil. Jangan FOMO, tapi jangan terlalu kaku sampai miss semua peluang.
 
-Balas HANYA dalam format JSON:
-{{"insights": ["poin1", "poin2", "poin3"], "kesimpulan": "teks kesimpulan singkat"}}
+{override_rule}
+
+Balas HANYA format JSON murni tanpa teks lain:
+{{
+  "ai_decision": "ENTER" atau "WAIT" atau "SKIP",
+  "ai_reason": "alasan singkat keputusan AI (1 kalimat)",
+  "is_override": true atau false,
+  "insights": ["poin analisis 1", "poin analisis 2", "poin analisis 3"],
+  "kesimpulan": "ringkasan akhir singkat"
+}}
 """
-        model    = genai.GenerativeModel("gemini-3.1-flash-lite")
+        model    = genai.GenerativeModel("gemini-1.5-flash")
         response = model.generate_content(prompt, generation_config={"response_mime_type": "application/json"})
         data     = json.loads(response.text.strip())
-        return data
+
+        # Safety floor: kalau rumus SKIP dengan score rendah, AI tidak boleh langsung ENTER
+        min_skip_override = 48 if trading_mode == "Scalping" else 52
+        if formula_decision == "SKIP" and score_total < min_skip_override:
+            data["ai_decision"] = "SKIP"
+            data["is_override"] = False
+            data["ai_reason"]   = f"Score {score_total} terlalu rendah — safety floor aktif, tetap SKIP."
+
+        # Kalau signal HOLD, AI tidak bisa paksa ENTER
+        if signal == "HOLD":
+            data["ai_decision"] = "SKIP"
+            data["is_override"] = False
+
+        return {
+            "insights":    data.get("insights", []),
+            "kesimpulan":  data.get("kesimpulan", ""),
+            "ai_decision": data.get("ai_decision", formula_decision),
+            "ai_reason":   data.get("ai_reason", ""),
+            "is_override": data.get("is_override", False),
+        }
     except Exception as e:
-        return {"insights": [f"Gemini tidak tersedia: {str(e)}"], "kesimpulan": ""}
+        fallback["insights"] = [f"Gemini tidak tersedia: {str(e)}"]
+        return fallback
 
 # ─────────────────────────────────────────────
 #  CHART GENERATOR
@@ -1004,13 +1052,53 @@ with tab1:
         st.markdown('<p class="section-header">AI Signal</p>', unsafe_allow_html=True)
 
         if df is not None:
-            tf_label_map    = {"1m":"1M","5m":"5M","15m":"15M","1h":"1H","4h":"4H","1d":"1D"}
+            tf_label_map     = {"1m":"1M","5m":"5M","15m":"15M","1h":"1H","4h":"4H","1d":"1D"}
             current_tf_label = tf_label_map.get(interval_val, "1H")
-            mtf_real        = calculate_mtf_score(symbol, current_tf_label, BINANCE_API_KEY, BINANCE_API_SECRET, trading_mode)
+            mtf_real         = calculate_mtf_score(symbol, current_tf_label, BINANCE_API_KEY, BINANCE_API_SECRET, trading_mode)
             signal, reason, signals, indicators, confidence, score_detail = calculate_signal(df, mtf_score_override=mtf_real)
-            decision, decision_reason, decision_color = calculate_trade_decision(
+            formula_decision, formula_reason, formula_color = calculate_trade_decision(
                 signal, score_detail, df, supports, resistances, trading_mode
             )
+
+            # ── GEMINI DECISION ENGINE (override layer) ──
+            gemini_result = None
+            if GEMINI_ENABLED:
+                gemini_result = get_gemini_decision(
+                    symbol=symbol,
+                    interval=interval_val,
+                    trading_mode=trading_mode,
+                    signal=signal,
+                    formula_decision=formula_decision,
+                    score_total=score_detail["total"],
+                    rsi=indicators.get("RSI", 0),
+                    macd_val=indicators.get("MACD", 0),
+                    ema20=indicators.get("EMA20", 0),
+                    ema50=indicators.get("EMA50", 0),
+                    current_price=price,
+                    supports_str=str(supports),
+                    resistances_str=str(resistances),
+                    mtf_context_str=f"MTF Score {mtf_real}/15",
+                    GEMINI_API_KEY=GEMINI_API_KEY,
+                    market_type=market_type,
+                    leverage=leverage,
+                )
+
+            # Final decision: AI override kalau ada, fallback ke formula
+            if gemini_result and gemini_result["ai_decision"]:
+                decision        = gemini_result["ai_decision"]
+                is_override     = gemini_result["is_override"]
+                override_reason = gemini_result["ai_reason"]
+                if is_override:
+                    decision_reason = f"🤖 AI Override: {override_reason}"
+                    decision_color  = "#d2a8ff"  # ungu = AI override
+                else:
+                    decision_reason = formula_reason if not override_reason else override_reason
+                    decision_color  = formula_color
+            else:
+                decision        = formula_decision
+                decision_reason = formula_reason
+                decision_color  = formula_color
+                is_override     = False
 
             signal_class   = f"signal-{signal.lower()}"
             signal_emoji   = "🟢" if signal == "BUY" else "🔴" if signal == "SELL" else "🔵"
@@ -1018,6 +1106,7 @@ with tab1:
             decision_emoji = "🟢" if decision == "ENTER" else "🟡" if decision == "WAIT" else "🔴"
             decision_bg    = "rgba(63,185,80,0.12)"  if decision == "ENTER" else \
                              "rgba(240,136,62,0.12)" if decision == "WAIT"  else "rgba(248,81,73,0.08)"
+            override_badge = f'<span style="font-size:10px; background:#2d1f3d; color:#d2a8ff; border:1px solid #6e40c9; border-radius:4px; padding:2px 6px; margin-left:6px;">✨ AI Override</span>' if is_override else ""
 
             st.markdown(f"""
             <div class="{signal_class}">
@@ -1026,11 +1115,11 @@ with tab1:
                 <div class="strength-bar-container">
                     <div class="strength-bar-fill" style="width:{confidence}%; background:{strength_color};"></div>
                 </div>
-                <p style="color:#8b949e; font-size:11px;">Confidence: {confidence}%</p>
+                <p style="color:#8b949e; font-size:11px;">Formula Score: {score_detail["total"]}/100 | Confidence: {confidence}%</p>
                 <div style="margin-top:14px; background:{decision_bg}; border:1px solid {decision_color};
                      border-radius:6px; padding:10px 12px; text-align:center;">
                     <p style="font-size:18px; font-weight:900; color:{decision_color}; margin:0; letter-spacing:3px;">
-                        {decision_emoji} {decision}
+                        {decision_emoji} {decision}{override_badge}
                     </p>
                     <p style="color:#8b949e; font-size:11px; margin:4px 0 0 0;">{decision_reason}</p>
                 </div>
@@ -1237,39 +1326,46 @@ with tab1:
             </div>
             """, unsafe_allow_html=True)
 
-            # ── Gemini AI Insights (enhancement layer) ──
-            if GEMINI_ENABLED and df is not None:
+            # ── Gemini AI Decision Display ──
+            if GEMINI_ENABLED and gemini_result:
                 st.markdown("---")
-                st.markdown('<p class="section-header">✨ Gemini AI Insights</p>', unsafe_allow_html=True)
-                gemini_data = get_gemini_insights(
-                        symbol=symbol,
-                        interval=interval_val,
-                        trading_mode=trading_mode,
-                        signal=signal,
-                        decision=decision,
-                        score_total=score_detail["total"],
-                        rsi=indicators.get("RSI", 0),
-                        macd_val=indicators.get("MACD", 0),
-                        ema20=indicators.get("EMA20", 0),
-                        ema50=indicators.get("EMA50", 0),
-                        current_price=price,
-                        supports_str=str(supports),
-                        resistances_str=str(resistances),
-                        mtf_context_str=f"MTF Score {mtf_real}/15",
-                        GEMINI_API_KEY=GEMINI_API_KEY,
-                        market_type=market_type,
-                        leverage=leverage
-                    )
-                if gemini_data:
-                    insights_html = "".join([
-                        f'<li style="color:#c9d1d9; font-size:13px; margin-bottom:6px; line-height:1.6;">{p}</li>'
-                        for p in gemini_data.get("insights", [])
-                    ])
-                    kesimpulan = gemini_data.get("kesimpulan", "")
+                override_header = "✨ Gemini AI — Decision Override Active" if is_override else "✨ Gemini AI Insights"
+                st.markdown(f'<p class="section-header">{override_header}</p>', unsafe_allow_html=True)
+
+                # Tampilkan formula vs AI decision kalau ada override
+                if is_override:
+                    f_emoji = "🟢" if formula_decision == "ENTER" else "🟡" if formula_decision == "WAIT" else "🔴"
+                    a_emoji = "🟢" if decision == "ENTER" else "🟡" if decision == "WAIT" else "🔴"
                     st.markdown(f"""
-                    <div class="gemini-card">
+                    <div style="background:#1a0f2e; border:1px solid #6e40c9; border-radius:8px; padding:12px; margin-bottom:10px;">
+                        <p style="color:#d2a8ff; font-size:12px; font-weight:700; margin:0 0 8px 0;">⚡ OVERRIDE AKTIF</p>
+                        <div style="display:flex; gap:16px; font-size:13px;">
+                            <div style="flex:1; text-align:center; opacity:0.6;">
+                                <p style="color:#8b949e; margin:0; font-size:10px;">FORMULA ASLI</p>
+                                <p style="color:#8b949e; font-size:16px; font-weight:700; margin:4px 0;">{f_emoji} {formula_decision}</p>
+                                <p style="color:#8b949e; font-size:10px; margin:0;">{formula_reason[:40]}...</p>
+                            </div>
+                            <div style="color:#6e40c9; font-size:20px; display:flex; align-items:center;">→</div>
+                            <div style="flex:1; text-align:center;">
+                                <p style="color:#d2a8ff; margin:0; font-size:10px;">AI DECISION</p>
+                                <p style="color:#d2a8ff; font-size:16px; font-weight:700; margin:4px 0;">{a_emoji} {decision}</p>
+                                <p style="color:#d2a8ff; font-size:10px; margin:0;">{gemini_result["ai_reason"][:40]}...</p>
+                            </div>
+                        </div>
+                    </div>
+                    """, unsafe_allow_html=True)
+
+                insights_html = "".join([
+                    f'<li style="color:#c9d1d9; font-size:13px; margin-bottom:6px; line-height:1.6;">{p}</li>'
+                    for p in gemini_result.get("insights", [])
+                ])
+                kesimpulan = gemini_result.get("kesimpulan", "")
+                if insights_html:
+                    border_color = "#6e40c9" if is_override else "#0f3460"
+                    st.markdown(f"""
+                    <div class="gemini-card" style="border-left-color:{"#d2a8ff" if is_override else "#d2a8ff"};">
                         <ul style="margin:0 0 12px 0; padding-left:18px;">{insights_html}</ul>
-                        {"<p style='color:#d2a8ff; font-size:14px; font-weight:700; margin:0; padding-top:10px; border-top:1px solid #0f3460;'>" + kesimpulan + "</p>" if kesimpulan else ""}
+                        {"<p style='color:#d2a8ff; font-size:14px; font-weight:700; margin:0; padding-top:10px; border-top:1px solid " + border_color + ";'>" + kesimpulan + "</p>" if kesimpulan else ""}
                     </div>
                     """, unsafe_allow_html=True)
 
@@ -1566,7 +1662,7 @@ with tab5:
     st.markdown(f"""
     <div style="background:#161b22; border:1px solid #30363d; border-radius:8px; padding:16px;">
         <p style="color:#8b949e; font-size:12px; margin:0;">
-        Version: <span style="color:#e6edf3;">v3.5 (Fase 3 — Spot + Futures Dual Market)</span><br>
+        Version: <span style="color:#e6edf3;">v3.0.0 (Fase 3 — Spot + Futures Dual Market)</span><br>
         Exchange: <span style="color:#e6edf3;">Binance Spot & Futures (USDS-M)</span><br>
         Features: <span style="color:#e6edf3;">Dual Mode · Futures LONG/SHORT · Leverage Calc · Real MTF · S&R · Stochastic · EMA200 · Trading Plan · Backtest · Top Gainers</span><br>
         Gemini AI: <span style="color:#e6edf3;">{gemini_status}</span><br>

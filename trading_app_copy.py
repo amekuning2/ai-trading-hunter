@@ -9,6 +9,7 @@ import time
 from datetime import datetime
 import google.generativeai as genai
 import json
+from binance_helper import fetch_ticker_price, fetch_klines_data
 
 # ─────────────────────────────────────────────
 #  CONFIG
@@ -195,31 +196,45 @@ def get_client(BINANCE_API_KEY, BINANCE_API_SECRET):
     return Client(BINANCE_API_KEY, BINANCE_API_SECRET)
 
 # ─────────────────────────────────────────────
-#  DATA FUNCTIONS
+#  DATA FUNCTIONS — DUAL MARKET (SPOT & FUTURES)
 # ─────────────────────────────────────────────
 @st.cache_data(ttl=30)
-def get_price(symbol, BINANCE_API_KEY, BINANCE_API_SECRET):
+def get_price(symbol, BINANCE_API_KEY, BINANCE_API_SECRET, market_type="Spot"):
     try:
         client = get_client(BINANCE_API_KEY, BINANCE_API_SECRET)
-        ticker = client.get_ticker(symbol=symbol)
-        return {
-            "price":       float(ticker["lastPrice"]),
-            "change":      float(ticker["priceChangePercent"]),
-            "high":        float(ticker["highPrice"]),
-            "low":         float(ticker["lowPrice"]),
-            "volume":      float(ticker["volume"]),
-            "quoteVolume": float(ticker["quoteVolume"]),
-        }
+        if market_type == "Futures":
+            ticker = client.futures_ticker(symbol=symbol)
+            return {
+                "price":       float(ticker["lastPrice"]),
+                "change":      float(ticker["priceChangePercent"]),
+                "high":        float(ticker["highPrice"]),
+                "low":         float(ticker["lowPrice"]),
+                "volume":      float(ticker["volume"]),
+                "quoteVolume": float(ticker["quoteVolume"]),
+            }
+        else:
+            ticker = client.get_ticker(symbol=symbol)
+            return {
+                "price":       float(ticker["lastPrice"]),
+                "change":      float(ticker["priceChangePercent"]),
+                "high":        float(ticker["highPrice"]),
+                "low":         float(ticker["lowPrice"]),
+                "volume":      float(ticker["volume"]),
+                "quoteVolume": float(ticker["quoteVolume"]),
+            }
     except Exception as e:
         st.error(f"BINANCE ERROR: {type(e).__name__}")
         st.error(str(e))
         raise
 
 @st.cache_data(ttl=60)
-def get_klines(symbol, interval, limit, BINANCE_API_KEY, BINANCE_API_SECRET):
+def get_klines(symbol, interval, limit, BINANCE_API_KEY, BINANCE_API_SECRET, market_type="Spot"):
     try:
         client = get_client(BINANCE_API_KEY, BINANCE_API_SECRET)
-        klines = client.get_klines(symbol=symbol, interval=interval, limit=limit)
+        if market_type == "Futures":
+            klines = client.futures_klines(symbol=symbol, interval=interval, limit=limit)
+        else:
+            klines = client.get_klines(symbol=symbol, interval=interval, limit=limit)
         df = pd.DataFrame(klines, columns=[
             "timestamp","open","high","low","close","volume",
             "close_time","quote_volume","trades","taker_buy_base",
@@ -761,10 +776,17 @@ def generate_ai_reasoning(signal, decision, decision_reason, score_detail, indic
 @st.cache_data(ttl=120)
 def get_gemini_insights(symbol, interval, trading_mode, signal, decision, score_total,
                         rsi, macd_val, ema20, ema50, current_price,
-                        supports_str, resistances_str, mtf_context_str, GEMINI_API_KEY):
+                        supports_str, resistances_str, mtf_context_str, GEMINI_API_KEY,
+                        market_type="Spot", leverage=1):
     if not GEMINI_API_KEY:
         return None
     try:
+        futures_note = f"""
+- Market Type: FUTURES (Leverage {leverage}x)
+- Di Futures, sinyal BUY = posisi LONG, sinyal SELL = posisi SHORT (keduanya valid)
+- Hitung potensi profit/loss dengan pengali leverage {leverage}x
+""" if market_type == "Futures" else "- Market Type: SPOT (hanya BUY/HOLD yang valid)"
+
         prompt = f"""
 Kamu adalah analis trading profesional yang membantu trader retail Indonesia.
 Berikan 3 poin insight singkat dan 1 kesimpulan dalam Bahasa Indonesia yang santai tapi informatif.
@@ -777,6 +799,7 @@ Data market:
 - Support levels: {supports_str}
 - Resistance levels: {resistances_str}
 - MTF bias: {mtf_context_str}
+{futures_note}
 
 Fokus pada: apakah setup ini worth it untuk diambil trader dengan modal kecil?
 Target: konsisten profit kecil, bukan FOMO besar.
@@ -855,10 +878,16 @@ def build_chart(df, symbol, resistances=[], supports=[]):
 # ─────────────────────────────────────────────
 #  SESSION STATE
 # ─────────────────────────────────────────────
-if "symbol"       not in st.session_state: st.session_state["symbol"]       = "BTCUSDT"
-if "interval_val" not in st.session_state: st.session_state["interval_val"] = "1h"
-if "candles"      not in st.session_state: st.session_state["candles"]      = 200
-if "auto_refresh" not in st.session_state: st.session_state["auto_refresh"] = False
+if "symbol"         not in st.session_state: st.session_state["symbol"]         = "BTCUSDT"
+if "interval_val"   not in st.session_state: st.session_state["interval_val"]   = "1h"
+if "candles"        not in st.session_state: st.session_state["candles"]        = 200
+if "auto_refresh"   not in st.session_state: st.session_state["auto_refresh"]   = False
+# ── Fase 3: Futures State ──
+if "market_type"    not in st.session_state: st.session_state["market_type"]    = "Spot"
+if "leverage"       not in st.session_state: st.session_state["leverage"]       = 10
+if "wallet_spot"    not in st.session_state: st.session_state["wallet_spot"]    = 50.0
+if "wallet_futures" not in st.session_state: st.session_state["wallet_futures"] = 50.0
+if "sim_history"    not in st.session_state: st.session_state["sim_history"]    = []
 
 # ─────────────────────────────────────────────
 #  MAIN CONTENT
@@ -884,6 +913,24 @@ with tab1:
         format_func=lambda mode: "⚡ Scalping — entry & TP cepat" if mode == "Scalping" else "🛡️ Ketat — seleksi maksimum",
     )
 
+    col_mode, col_lev = st.columns([1, 1])
+    with col_mode:
+        market_type = st.selectbox(
+            "🏦 Market Type",
+            ["Spot", "Futures"],
+            index=0 if st.session_state["market_type"] == "Spot" else 1,
+            format_func=lambda x: "🔵 Spot — Hanya BUY/HOLD" if x == "Spot" else "🟡 Futures — LONG & SHORT"
+        )
+        st.session_state["market_type"] = market_type
+    with col_lev:
+        if market_type == "Futures":
+            leverage = st.slider("⚡ Leverage", min_value=1, max_value=20, value=st.session_state["leverage"])
+            st.session_state["leverage"] = leverage
+        else:
+            leverage = 1
+            st.session_state["leverage"] = 1
+            st.markdown(f"""<div style="padding:10px; color:#8b949e; font-size:12px; margin-top:8px;">Leverage: 1x (Spot mode)</div>""", unsafe_allow_html=True)
+
     col_tf, col_candle = st.columns([2, 1])
     with col_tf:
         interval = st.selectbox("⏱ Timeframe", [
@@ -894,7 +941,7 @@ with tab1:
     with col_candle:
         candles = st.slider("Candles", 50, 500, 200)
 
-    price_data = get_price(symbol, BINANCE_API_KEY, BINANCE_API_SECRET)
+    price_data = get_price(symbol, BINANCE_API_KEY, BINANCE_API_SECRET, market_type=market_type)
     if price_data is None:
         st.error(f"Gagal ambil data {symbol}. Cek API key atau nama pair.")
         st.stop()
@@ -909,7 +956,8 @@ with tab1:
         st.markdown(f"""
         <div style="margin-bottom:8px;">
             <span style="font-size:28px; font-weight:800; color:#e6edf3;">{symbol}</span>
-            <span style="font-size:13px; color:#8b949e; margin-left:12px;">BINANCE SPOT</span>
+            <span style="font-size:13px; color:#8b949e; margin-left:12px;">BINANCE {market_type.upper()}</span>
+            {f'<span style="font-size:12px; color:#f0883e; margin-left:8px; font-weight:700;">⚡ {leverage}x</span>' if market_type == "Futures" else ""}
         </div>
         <div>
             <span style="font-size:36px; font-weight:700; color:#e6edf3;">${price:,.4f}</span>
@@ -942,7 +990,7 @@ with tab1:
 
     with col_chart:
         st.markdown('<p class="section-header">Price Chart</p>', unsafe_allow_html=True)
-        df          = get_klines(symbol, interval_val, candles, BINANCE_API_KEY, BINANCE_API_SECRET)
+        df          = get_klines(symbol, interval_val, candles, BINANCE_API_KEY, BINANCE_API_SECRET, market_type=market_type)
         resistances, supports = get_support_resistance(df)
         if df is not None:
             fig = build_chart(df, symbol, resistances, supports)
@@ -1065,15 +1113,27 @@ with tab1:
                 rr_target   = 0.7 if trading_mode == "Scalping" else 1.5
                 rr_marginal = 0.6 if trading_mode == "Scalping" else 1.0
                 rr_color    = "#3fb950" if plan["rr_ratio"] >= rr_target else "#f0883e" if plan["rr_ratio"] >= rr_marginal else "#f85149"
-                action_color = "#3fb950" if plan["signal"] == "BUY" else "#f85149"
-                action_emoji = "🟢" if plan["signal"] == "BUY" else "🔴"
+
+                # Label aksi: Futures pakai LONG/SHORT, Spot pakai BUY/SELL
+                if market_type == "Futures":
+                    action_label = "🟡 LONG (BUY)" if plan["signal"] == "BUY" else "🔴 SHORT (SELL)"
+                    action_color = "#f0883e" if plan["signal"] == "BUY" else "#f85149"
+                else:
+                    action_label = f"🟢 {plan['signal']}" if plan["signal"] == "BUY" else f"🔴 {plan['signal']}"
+                    action_color = "#3fb950" if plan["signal"] == "BUY" else "#f85149"
+
+                # P&L dengan leverage
+                lev_profit_tp1 = round(plan["profit_tp1"] * leverage, 2)
+                lev_profit_tp2 = round(plan["profit_tp2"] * leverage, 2)
+                lev_profit_tp3 = round(plan["profit_tp3"] * leverage, 2)
+                lev_loss_sl    = round(plan["loss_sl"]    * leverage, 2)
 
                 col_p1, col_p2, col_p3 = st.columns(3)
                 with col_p1:
                     st.markdown(f"""
                     <div class="tp-card">
                         <p style="color:#8b949e; font-size:11px; text-transform:uppercase; letter-spacing:1px; margin:0 0 12px 0;">Entry & Exit</p>
-                        <div class="tp-row"><span class="tp-label">Action</span><span class="tp-value" style="color:{action_color};">{action_emoji} {plan["signal"]}</span></div>
+                        <div class="tp-row"><span class="tp-label">Posisi</span><span class="tp-value" style="color:{action_color};">{action_label}</span></div>
                         <div class="tp-row"><span class="tp-label">Entry Price</span><span class="tp-value tp-yellow">${plan["entry"]:,.4f}</span></div>
                         <div class="tp-row"><span class="tp-label">Stop Loss</span><span class="tp-value tp-red">${plan["sl"]:,.4f} (-{plan["sl_pct"]}%)</span></div>
                         <div class="tp-row"><span class="tp-label">TP 1</span><span class="tp-value tp-green">${plan["tp1"]:,.4f} (+{plan["tp1_pct"]}%)</span></div>
@@ -1082,24 +1142,59 @@ with tab1:
                     </div>
                     """, unsafe_allow_html=True)
                 with col_p2:
+                    lev_label = f"{leverage}x" if market_type == "Futures" else "1x (Spot)"
                     st.markdown(f"""
                     <div class="tp-card">
                         <p style="color:#8b949e; font-size:11px; text-transform:uppercase; letter-spacing:1px; margin:0 0 12px 0;">Risk & Reward</p>
                         <div class="tp-row"><span class="tp-label">R/R Ratio</span><span class="tp-value" style="color:{rr_color};">1 : {plan["rr_ratio"]}</span></div>
                         <div class="tp-row"><span class="tp-label">ATR</span><span class="tp-value">${plan["atr"]:,.4f}</span></div>
-                        <div class="tp-row"><span class="tp-label">Modal</span><span class="tp-value">${plan["modal"]:,.2f} USDT</span></div>
+                        <div class="tp-row"><span class="tp-label">Modal / Margin</span><span class="tp-value">${plan["modal"]:,.2f} USDT</span></div>
+                        <div class="tp-row"><span class="tp-label">Leverage</span><span class="tp-value" style="color:#f0883e;">{lev_label}</span></div>
                         <div class="tp-row"><span class="tp-label">Qty</span><span class="tp-value">{plan["qty"]} {symbol.replace("USDT","")}</span></div>
                     </div>
                     """, unsafe_allow_html=True)
                 with col_p3:
+                    pnl_note = f" (x{leverage})" if market_type == "Futures" else ""
                     st.markdown(f"""
                     <div class="tp-card">
-                        <p style="color:#8b949e; font-size:11px; text-transform:uppercase; letter-spacing:1px; margin:0 0 12px 0;">Estimasi P&L</p>
-                        <div class="tp-row"><span class="tp-label">Profit TP1</span><span class="tp-value tp-green">+${plan["profit_tp1"]}</span></div>
-                        <div class="tp-row"><span class="tp-label">Profit TP2</span><span class="tp-value tp-green">+${plan["profit_tp2"]}</span></div>
-                        <div class="tp-row"><span class="tp-label">Profit TP3</span><span class="tp-value tp-green">+${plan["profit_tp3"]}</span></div>
-                        <div class="tp-row"><span class="tp-label">Max Loss</span><span class="tp-value tp-red">-${plan["loss_sl"]}</span></div>
+                        <p style="color:#8b949e; font-size:11px; text-transform:uppercase; letter-spacing:1px; margin:0 0 12px 0;">Estimasi P&L{pnl_note}</p>
+                        <div class="tp-row"><span class="tp-label">Profit TP1</span><span class="tp-value tp-green">+${lev_profit_tp1}</span></div>
+                        <div class="tp-row"><span class="tp-label">Profit TP2</span><span class="tp-value tp-green">+${lev_profit_tp2}</span></div>
+                        <div class="tp-row"><span class="tp-label">Profit TP3</span><span class="tp-value tp-green">+${lev_profit_tp3}</span></div>
+                        <div class="tp-row"><span class="tp-label">Max Loss</span><span class="tp-value tp-red">-${lev_loss_sl}</span></div>
                         <div class="tp-row"><span class="tp-label">Worth it?</span><span class="tp-value" style="color:{rr_color};">{"✅ YES" if plan["rr_ratio"] >= rr_target else "⚠️ MARGINAL" if plan["rr_ratio"] >= rr_marginal else "❌ NO"}</span></div>
+                    </div>
+                    """, unsafe_allow_html=True)
+
+                # Sim button
+                cur_wallet_key  = "wallet_futures" if market_type == "Futures" else "wallet_spot"
+                cur_wallet_bal  = st.session_state[cur_wallet_key]
+                pos_type        = ("LONG" if plan["signal"] == "BUY" else "SHORT") if market_type == "Futures" else plan["signal"]
+                btn_label       = f"🚀 Buka Posisi Simulasi ({pos_type}) — Alokasi ${modal:.0f} USDT"
+                st.markdown("<br>", unsafe_allow_html=True)
+                col_btn, col_bal = st.columns([2, 1])
+                with col_btn:
+                    if st.button(btn_label, use_container_width=True):
+                        if cur_wallet_bal >= modal:
+                            st.session_state[cur_wallet_key] -= modal
+                            st.session_state["sim_history"].append({
+                                "time":   datetime.now().strftime("%H:%M:%S"),
+                                "market": market_type,
+                                "type":   pos_type,
+                                "entry":  plan["entry"],
+                                "tp1":    plan["tp1"],
+                                "sl":     plan["sl"],
+                                "modal":  modal,
+                                "lev":    leverage,
+                            })
+                            st.success(f"✅ Posisi simulasi {pos_type} dicatat! Sisa saldo {market_type}: ${st.session_state[cur_wallet_key]:.2f}")
+                        else:
+                            st.error(f"❌ Saldo simulasi {market_type} tidak cukup (${cur_wallet_bal:.2f} < ${modal:.0f})")
+                with col_bal:
+                    st.markdown(f"""
+                    <div style="background:#161b22; border:1px solid #30363d; border-radius:8px; padding:10px; text-align:center; margin-top:4px;">
+                        <p style="color:#8b949e; font-size:10px; margin:0 0 4px 0;">SALDO SIM {market_type.upper()}</p>
+                        <p style="color:#3fb950; font-size:16px; font-weight:800; margin:0;">${cur_wallet_bal:.2f}</p>
                     </div>
                     """, unsafe_allow_html=True)
 
@@ -1107,12 +1202,12 @@ with tab1:
                 <div style="background:#161b22; border:1px solid #30363d; border-radius:8px; padding:12px; margin-top:8px;">
                     <p style="color:#8b949e; font-size:12px; margin:0;">
                     💡 <strong style="color:#e6edf3;">Cara pakai:</strong>
-                    Entry di <strong style="color:#f0883e;">${plan["entry"]:,.4f}</strong> →
+                    {"Buka posisi " + pos_type + " di" if market_type == "Futures" else "Entry di"} <strong style="color:#f0883e;">${plan["entry"]:,.4f}</strong> →
                     Pasang SL di <strong style="color:#f85149;">${plan["sl"]:,.4f}</strong> →
-                    TP sebagian di <strong style="color:#3fb950;">${plan["tp1"]:,.4f}</strong>,
-                    sisanya di <strong style="color:#3fb950;">${plan["tp2"]:,.4f}</strong>.
+                    TP sebagian di <strong style="color:#3fb950;">${plan["tp1"]:,.4f}</strong>.
                     R/R <strong style="color:{rr_color};">1:{plan["rr_ratio"]}</strong>
-                    {"— trade ini worth it! ✅" if plan["rr_ratio"] >= rr_target else "— pertimbangkan ulang ⚠️" if plan["rr_ratio"] >= rr_marginal else "— skip trade ini ❌"}
+                    {"| Leverage " + str(leverage) + "x → Efektif profit TP1: +$" + str(lev_profit_tp1) if market_type == "Futures" else ""}
+                    {"— worth it! ✅" if plan["rr_ratio"] >= rr_target else "— pertimbangkan ⚠️" if plan["rr_ratio"] >= rr_marginal else "— skip ❌"}
                     </p>
                 </div>
                 """, unsafe_allow_html=True)
@@ -1161,7 +1256,9 @@ with tab1:
                         supports_str=str(supports),
                         resistances_str=str(resistances),
                         mtf_context_str=f"MTF Score {mtf_real}/15",
-                        GEMINI_API_KEY=GEMINI_API_KEY
+                        GEMINI_API_KEY=GEMINI_API_KEY,
+                        market_type=market_type,
+                        leverage=leverage
                     )
                 if gemini_data:
                     insights_html = "".join([
@@ -1283,7 +1380,7 @@ with tab4:
     bt_modal = st.number_input("💵 Modal per Trade (USDT)", min_value=1.0, value=10.0, step=5.0)
 
     if st.button("▶️ Jalankan Backtest", use_container_width=True):
-        df_bt = get_klines(bt_symbol, bt_interval_val, bt_candles, BINANCE_API_KEY, BINANCE_API_SECRET)
+        df_bt = get_klines(bt_symbol, bt_interval_val, bt_candles, BINANCE_API_KEY, BINANCE_API_SECRET, market_type="Spot")
 
         if df_bt is None or len(df_bt) < 100:
             st.error("Data tidak cukup untuk backtest. Coba tambah jumlah candles.")
@@ -1420,8 +1517,41 @@ with tab4:
 
 # ─── TAB 5: SETTINGS ───
 with tab5:
-    st.markdown('<p class="section-header">⚙️ Settings</p>', unsafe_allow_html=True)
+    st.markdown('<p class="section-header">⚙️ Settings & Simulasi Wallet</p>', unsafe_allow_html=True)
 
+    # Sim history log
+    st.markdown("**📜 Log Simulasi Posisi**")
+    if not st.session_state["sim_history"]:
+        st.caption("Belum ada posisi simulasi yang dicatat.")
+    else:
+        for log in reversed(st.session_state["sim_history"][-20:]):
+            pos_color = "#f0883e" if log["type"] in ("LONG","BUY") else "#f85149"
+            mkt_badge = "🟡 Futures" if log["market"] == "Futures" else "🔵 Spot"
+            lev_str = f" | {log['lev']}x" if log.get("lev", 1) > 1 else ""
+            st.markdown(f"""
+            <div style="padding:8px 12px; margin:3px 0; background:#161b22; border:1px solid #30363d;
+                 border-left:3px solid {pos_color}; border-radius:6px; font-size:12px;">
+                <span style="color:#8b949e;">{log["time"]}</span>
+                <span style="color:#e6edf3; margin:0 8px;">{mkt_badge}{lev_str}</span>
+                <span style="color:{pos_color}; font-weight:700;">{log["type"]}</span>
+                <span style="color:#8b949e; margin-left:8px;">Entry: ${log.get("entry", "-")} | TP1: ${log.get("tp1", "-")} | SL: ${log.get("sl", "-")} | Modal: ${log.get("modal", "-")}</span>
+            </div>
+            """, unsafe_allow_html=True)
+
+    st.markdown("---")
+    st.markdown("**💰 Manajemen Saldo Simulasi**")
+    col_ws, col_wf = st.columns(2)
+    with col_ws:
+        st.metric("Saldo Spot", f"${st.session_state['wallet_spot']:.2f} USDT")
+    with col_wf:
+        st.metric("Saldo Futures", f"${st.session_state['wallet_futures']:.2f} USDT")
+    if st.button("🔄 Reset Saldo ($50 Spot + $50 Futures)", use_container_width=True):
+        st.session_state["wallet_spot"] = 50.0
+        st.session_state["wallet_futures"] = 50.0
+        st.session_state["sim_history"] = []
+        st.rerun()
+
+    st.markdown("---")
     st.markdown("**🔄 Auto Refresh**")
     auto_refresh = st.checkbox("Auto Refresh setiap 30 detik", value=st.session_state["auto_refresh"])
     st.session_state["auto_refresh"] = auto_refresh
@@ -1436,9 +1566,9 @@ with tab5:
     st.markdown(f"""
     <div style="background:#161b22; border:1px solid #30363d; border-radius:8px; padding:16px;">
         <p style="color:#8b949e; font-size:12px; margin:0;">
-        Version: <span style="color:#e6edf3;">v2.9.5 (Hybrid — v2.6 Base + Gemini Enhancement Layer)</span><br>
-        Exchange: <span style="color:#e6edf3;">Binance Spot</span><br>
-        Features: <span style="color:#e6edf3;">Dual Mode (Scalping & Ketat) · Real MTF Score · S&R · Stochastic · EMA200 · Trading Plan · Backtesting · Top Gainers</span><br>
+        Version: <span style="color:#e6edf3;">v3.5 (Fase 3 — Spot + Futures Dual Market)</span><br>
+        Exchange: <span style="color:#e6edf3;">Binance Spot & Futures (USDS-M)</span><br>
+        Features: <span style="color:#e6edf3;">Dual Mode · Futures LONG/SHORT · Leverage Calc · Real MTF · S&R · Stochastic · EMA200 · Trading Plan · Backtest · Top Gainers</span><br>
         Gemini AI: <span style="color:#e6edf3;">{gemini_status}</span><br>
         Status: <span style="color:#3fb950;">🟢 Running</span>
         </p>
