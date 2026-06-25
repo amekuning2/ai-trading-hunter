@@ -835,7 +835,7 @@ Balas HANYA format JSON murni tanpa teks lain:
   "kesimpulan": "ringkasan akhir singkat"
 }}
 """
-        model    = genai.GenerativeModel("gemini-3.1-flash-lite")
+        model    = genai.GenerativeModel("gemini-1.5-flash")
         response = model.generate_content(prompt, generation_config={"response_mime_type": "application/json"})
         data     = json.loads(response.text.strip())
 
@@ -946,9 +946,14 @@ with col_sel1:
     symbol = st.selectbox("🪙 Select Pair", DEFAULT_PAIRS,
                           index=DEFAULT_PAIRS.index(st.session_state["symbol"]) if st.session_state["symbol"] in DEFAULT_PAIRS else 0)
 with col_sel2:
-    custom = st.text_input("Custom pair", placeholder="e.g. ADAUSDT")
-    if custom:
-        symbol = custom.upper()
+    custom_raw = st.text_input("Custom pair", placeholder="e.g. ADAUSDT")
+    if custom_raw:
+        import re
+        custom_clean = re.sub(r"[^A-Za-z0-9]", "", custom_raw).upper().strip()
+        if len(custom_clean) >= 4:
+            symbol = custom_clean
+        else:
+            st.caption("⚠️ Pair tidak valid — min 4 karakter alfanumerik")
 st.session_state["symbol"] = symbol
 
 tab1, tab2, tab3, tab4, tab5 = st.tabs(["📊 Dashboard", "🕐 Multi-Timeframe", "🔥 Top Gainers", "🧪 Backtesting", "⚙️ Settings"])
@@ -1662,7 +1667,7 @@ with tab5:
     st.markdown(f"""
     <div style="background:#161b22; border:1px solid #30363d; border-radius:8px; padding:16px;">
         <p style="color:#8b949e; font-size:12px; margin:0;">
-        Version: <span style="color:#e6edf3;">v3.0.0 (Fase 3 — Spot + Futures Dual Market)</span><br>
+        Version: <span style="color:#e6edf3;">v3.5b (Fase 3 — Spot + Futures Dual Market)</span><br>
         Exchange: <span style="color:#e6edf3;">Binance Spot & Futures (USDS-M)</span><br>
         Features: <span style="color:#e6edf3;">Dual Mode · Futures LONG/SHORT · Leverage Calc · Real MTF · S&R · Stochastic · EMA200 · Trading Plan · Backtest · Top Gainers</span><br>
         Gemini AI: <span style="color:#e6edf3;">{gemini_status}</span><br>
