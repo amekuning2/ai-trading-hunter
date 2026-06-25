@@ -36,7 +36,7 @@ def fetch_klines_data(client, symbol, interval, limit=150, market_type="Spot"):
             klines = client.futures_klines(symbol=symbol, interval=interval, limit=limit)
         else:
             klines = client.get_klines(symbol=symbol, interval=interval, limit=limit)
-            
+
         df = pd.DataFrame(klines, columns=[
             "timestamp","open","high","low","close","volume",
             "close_time","quote_volume","trades","taker_buy_base",
