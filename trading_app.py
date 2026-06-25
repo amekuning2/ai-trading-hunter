@@ -204,28 +204,24 @@ def get_price(symbol, BINANCE_API_KEY, BINANCE_API_SECRET, market_type="Spot"):
         client = get_client(BINANCE_API_KEY, BINANCE_API_SECRET)
         if market_type == "Futures":
             ticker = client.futures_ticker(symbol=symbol)
-            return {
-                "price":       float(ticker["lastPrice"]),
-                "change":      float(ticker["priceChangePercent"]),
-                "high":        float(ticker["highPrice"]),
-                "low":         float(ticker["lowPrice"]),
-                "volume":      float(ticker["volume"]),
-                "quoteVolume": float(ticker["quoteVolume"]),
-            }
         else:
             ticker = client.get_ticker(symbol=symbol)
-            return {
-                "price":       float(ticker["lastPrice"]),
-                "change":      float(ticker["priceChangePercent"]),
-                "high":        float(ticker["highPrice"]),
-                "low":         float(ticker["lowPrice"]),
-                "volume":      float(ticker["volume"]),
-                "quoteVolume": float(ticker["quoteVolume"]),
-            }
+        return {
+            "price":       float(ticker["lastPrice"]),
+            "change":      float(ticker["priceChangePercent"]),
+            "high":        float(ticker["highPrice"]),
+            "low":         float(ticker["lowPrice"]),
+            "volume":      float(ticker["volume"]),
+            "quoteVolume": float(ticker["quoteVolume"]),
+            "error":       None,
+        }
     except Exception as e:
-        st.error(f"BINANCE ERROR: {type(e).__name__}")
-        st.error(str(e))
-        raise
+        err_msg = str(e)
+        if "-1121" in err_msg:
+            return {"error": f"❌ Pair **{symbol}** tidak tersedia di Binance {market_type}. Coba ganti ke Spot atau pilih pair lain."}
+        elif "-1100" in err_msg:
+            return {"error": f"❌ Nama pair **{symbol}** tidak valid. Pastikan format benar (contoh: BTCUSDT)."}
+        return {"error": f"❌ Binance error: {err_msg}"}
 
 @st.cache_data(ttl=60)
 def get_klines(symbol, interval, limit, BINANCE_API_KEY, BINANCE_API_SECRET, market_type="Spot"):
@@ -940,20 +936,30 @@ if "sim_history"    not in st.session_state: st.session_state["sim_history"]    
 # ─────────────────────────────────────────────
 #  MAIN CONTENT
 # ─────────────────────────────────────────────
-DEFAULT_PAIRS = ["BTCUSDT", "ETHUSDT", "BNBUSDT", "SOLUSDT", "XRPUSDT", "DOGEUSDT"]
+SPOT_PAIRS    = ["BTCUSDT", "ETHUSDT", "BNBUSDT", "SOLUSDT", "XRPUSDT", "DOGEUSDT"]
+FUTURES_PAIRS = ["BTCUSDT", "ETHUSDT", "BNBUSDT", "SOLUSDT", "XRPUSDT", "DOGEUSDT",
+                 "ADAUSDT", "LINKUSDT", "DOTUSDT", "AVAXUSDT", "MATICUSDT", "LTCUSDT",
+                 "ATOMUSDT", "NEARUSDT", "APTUSDT", "ARBUSDT", "OPUSDT", "SUIUSDT"]
+
+# Market type belum terdefinisi di sini, baca dari session state
+_cur_market = st.session_state.get("market_type", "Spot")
+DEFAULT_PAIRS = FUTURES_PAIRS if _cur_market == "Futures" else SPOT_PAIRS
+
 col_sel1, col_sel2 = st.columns([2, 1])
 with col_sel1:
-    symbol = st.selectbox("🪙 Select Pair", DEFAULT_PAIRS,
-                          index=DEFAULT_PAIRS.index(st.session_state["symbol"]) if st.session_state["symbol"] in DEFAULT_PAIRS else 0)
+    _safe_idx = DEFAULT_PAIRS.index(st.session_state["symbol"]) if st.session_state["symbol"] in DEFAULT_PAIRS else 0
+    symbol = st.selectbox("🪙 Select Pair", DEFAULT_PAIRS, index=_safe_idx)
 with col_sel2:
+    import re
     custom_raw = st.text_input("Custom pair", placeholder="e.g. ADAUSDT")
     if custom_raw:
-        import re
         custom_clean = re.sub(r"[^A-Za-z0-9]", "", custom_raw).upper().strip()
         if len(custom_clean) >= 4:
             symbol = custom_clean
         else:
-            st.caption("⚠️ Pair tidak valid — min 4 karakter alfanumerik")
+            st.caption("⚠️ Min 4 karakter alfanumerik")
+    if _cur_market == "Futures":
+        st.caption("💡 Futures: tidak semua pair Spot tersedia")
 st.session_state["symbol"] = symbol
 
 tab1, tab2, tab3, tab4, tab5 = st.tabs(["📊 Dashboard", "🕐 Multi-Timeframe", "🔥 Top Gainers", "🧪 Backtesting", "⚙️ Settings"])
@@ -995,8 +1001,15 @@ with tab1:
         candles = st.slider("Candles", 50, 500, 200)
 
     price_data = get_price(symbol, BINANCE_API_KEY, BINANCE_API_SECRET, market_type=market_type)
-    if price_data is None:
-        st.error(f"Gagal ambil data {symbol}. Cek API key atau nama pair.")
+    if price_data is None or price_data.get("error"):
+        err = price_data.get("error") if price_data else f"Gagal ambil data {symbol}."
+        st.markdown(f"""
+        <div style="background:#2d1b1b; border:1px solid #f85149; border-radius:8px; padding:20px; margin:16px 0;">
+            <p style="color:#f85149; font-size:16px; font-weight:700; margin:0 0 8px 0;">⚠️ Pair Tidak Tersedia</p>
+            <p style="color:#e6edf3; font-size:14px; margin:0;">{err}</p>
+            {"<p style=\'color:#8b949e; font-size:12px; margin:8px 0 0 0;\'>💡 <strong>Tip Futures:</strong> Tidak semua pair Spot tersedia di Futures. Pair populer yang ada di Futures: BTCUSDT, ETHUSDT, BNBUSDT, SOLUSDT, XRPUSDT, DOGEUSDT, ADAUSDT, LINKUSDT, DOTUSDT.</p>" if market_type == "Futures" else ""}
+        </div>
+        """, unsafe_allow_html=True)
         st.stop()
 
     price        = price_data["price"]
@@ -1667,7 +1680,7 @@ with tab5:
     st.markdown(f"""
     <div style="background:#161b22; border:1px solid #30363d; border-radius:8px; padding:16px;">
         <p style="color:#8b949e; font-size:12px; margin:0;">
-        Version: <span style="color:#e6edf3;">v3.5b (Fase 3 — Spot + Futures Dual Market)</span><br>
+        Version: <span style="color:#e6edf3;">v3.6 (Fase 3 — Spot + Futures Dual Market)</span><br>
         Exchange: <span style="color:#e6edf3;">Binance Spot & Futures (USDS-M)</span><br>
         Features: <span style="color:#e6edf3;">Dual Mode · Futures LONG/SHORT · Leverage Calc · Real MTF · S&R · Stochastic · EMA200 · Trading Plan · Backtest · Top Gainers</span><br>
         Gemini AI: <span style="color:#e6edf3;">{gemini_status}</span><br>
