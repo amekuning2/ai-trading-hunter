@@ -894,7 +894,7 @@ BALAS HANYA JSON:
 }}
 """
     try:
-        model    = genai.GenerativeModel("gemini-3.1-flash-lite")
+        model    = genai.GenerativeModel("gemini-2.0-flash")
         response = model.generate_content(prompt, generation_config={"response_mime_type":"application/json"})
         data     = json.loads(response.text.strip())
         return {
@@ -1309,111 +1309,123 @@ with tab1:
         modal = st.number_input("💵 Modal (USDT)", min_value=1.0, value=10.0, step=5.0, format="%.2f")
 
         if df is not None and price_data is not None and gemini_data and gemini_data.get("ai_active") and ai_action in ("BUY","SELL"):
-            plan = generate_trading_plan(df, price_data, signal, supports, resistances, modal_usdt=modal, trading_mode=trading_mode)
+            # Ambil level langsung dari Gemini
+            g_entry = float(gemini_data.get("entry", price) or price)
+            g_tp1   = float(gemini_data.get("tp1", 0) or 0)
+            g_tp2   = float(gemini_data.get("tp2", 0) or 0)
+            g_sl    = float(gemini_data.get("sl", 0) or 0)
 
-            if plan:
-                if trading_mode == "Scalping":
-                    rr_target, rr_marginal = 0.45, 0.35
-                elif trading_mode == "Intraday":
-                    rr_target, rr_marginal = 0.8, 0.6
-                else:
-                    rr_target, rr_marginal = 1.2, 0.9
-                rr_color     = "#3fb950" if rr_ratio >= rr_target else "#f0883e" if rr_ratio >= rr_marginal else "#f85149"
-                lev_profit1  = round(profit_tp1 * leverage, 2)
-                lev_profit2  = round(profit_tp2 * leverage, 2)
-                lev_loss     = round(loss_sl * leverage, 2)
+            # Hitung RR dan PnL dari level Gemini
+            sl_dist    = abs(g_entry - g_sl) if g_sl > 0 else 0.001
+            tp1_dist   = abs(g_tp1 - g_entry) if g_tp1 > 0 else 0
+            tp2_dist   = abs(g_tp2 - g_entry) if g_tp2 > 0 else 0
+            rr_ratio   = round(tp1_dist / sl_dist, 2) if sl_dist > 0 else 0
+            qty        = round(modal / g_entry, 6) if g_entry > 0 else 0
+            profit_tp1 = round(tp1_dist * qty, 2)
+            profit_tp2 = round(tp2_dist * qty, 2)
+            loss_sl    = round(sl_dist * qty, 2)
 
-                if market_type == "Futures":
-                    action_label = f"🟡 LONG" if ai_action=="BUY" else "🔴 SHORT"
-                    action_color = "#f0883e" if ai_action=="BUY" else "#f85149"
-                else:
-                    action_label = f"🟢 {ai_action}" if ai_action=="BUY" else f"🔴 {ai_action}"
-                    action_color = "#3fb950" if ai_action=="BUY" else "#f85149"
+            if trading_mode == "Aggressive": rr_target, rr_marginal = 0.3, 0.2
+            elif trading_mode == "Scalping": rr_target, rr_marginal = 0.45, 0.35
+            elif trading_mode == "Intraday": rr_target, rr_marginal = 0.8, 0.6
+            else:                            rr_target, rr_marginal = 1.2, 0.9
 
-                col_p1, col_p2, col_p3 = st.columns(3)
-                with col_p1:
-                    st.markdown(f"""
-                    <div class="tp-card">
-                        <p style="color:#d2a8ff; font-size:11px; text-transform:uppercase; letter-spacing:1px; margin:0 0 12px 0;">✨ Level dari Gemini AI</p>
-                        <div class="tp-row"><span class="tp-label">Posisi</span><span class="tp-value" style="color:{action_color};">{action_label}</span></div>
-                        <div class="tp-row"><span class="tp-label">Entry</span><span class="tp-value tp-yellow">{g_entry:,.4f}</span></div>
-                        <div class="tp-row"><span class="tp-label">Stop Loss</span><span class="tp-value tp-red">{g_sl:,.4f}</span></div>
-                        <div class="tp-row"><span class="tp-label">TP 1</span><span class="tp-value tp-green">{g_tp1:,.4f}</span></div>
-                        <div class="tp-row"><span class="tp-label">TP 2</span><span class="tp-value tp-green">{g_tp2:,.4f}</span></div>
-                    </div>
-                    """, unsafe_allow_html=True)
-                with col_p2:
-                    lev_label = f"{leverage}x" if market_type=="Futures" else "1x (Spot)"
-                    st.markdown(f"""
-                    <div class="tp-card">
-                        <p style="color:#8b949e; font-size:11px; text-transform:uppercase; letter-spacing:1px; margin:0 0 12px 0;">Risk & Reward</p>
-                        <div class="tp-row"><span class="tp-label">R/R Ratio</span><span class="tp-value" style="color:{rr_color};">1 : {rr_ratio}</span></div>
-                        <div class="tp-row"><span class="tp-label">Modal</span><span class="tp-value">${modal:,.2f} USDT</span></div>
-                        <div class="tp-row"><span class="tp-label">Leverage</span><span class="tp-value" style="color:#f0883e;">{lev_label}</span></div>
-                        <div class="tp-row"><span class="tp-label">Qty</span><span class="tp-value">{qty} {symbol.replace("USDT","")}</span></div>
-                        <div class="tp-row"><span class="tp-label">AI Confidence</span><span class="tp-value" style="color:{conf_color};">{gemini_data.get("confidence",0)}%</span></div>
-                    </div>
-                    """, unsafe_allow_html=True)
-                with col_p3:
-                    pnl_note = f" (x{leverage})" if market_type=="Futures" else ""
-                    st.markdown(f"""
-                    <div class="tp-card">
-                        <p style="color:#8b949e; font-size:11px; text-transform:uppercase; letter-spacing:1px; margin:0 0 12px 0;">Estimasi P&L{pnl_note}</p>
-                        <div class="tp-row"><span class="tp-label">Profit TP1</span><span class="tp-value tp-green">+${lev_profit1}</span></div>
-                        <div class="tp-row"><span class="tp-label">Profit TP2</span><span class="tp-value tp-green">+${lev_profit2}</span></div>
-                        <div class="tp-row"><span class="tp-label">Max Loss</span><span class="tp-value tp-red">-${lev_loss}</span></div>
-                        <div class="tp-row"><span class="tp-label">Worth it?</span><span class="tp-value" style="color:{rr_color};">{"✅ YES" if rr_ratio>=rr_target else "⚠️ MARGINAL" if rr_ratio>=rr_marginal else "❌ SKIP"}</span></div>
-                    </div>
-                    """, unsafe_allow_html=True)
+            rr_color    = "#3fb950" if rr_ratio >= rr_target else "#f0883e" if rr_ratio >= rr_marginal else "#f85149"
+            lev_profit1 = round(profit_tp1 * leverage, 2)
+            lev_profit2 = round(profit_tp2 * leverage, 2)
+            lev_loss    = round(loss_sl * leverage, 2)
 
-                # Sim button
-                cur_wallet_key  = "wallet_futures" if market_type == "Futures" else "wallet_spot"
-                cur_wallet_bal  = st.session_state[cur_wallet_key]
-                pos_type        = ("LONG" if ai_action == "BUY" else "SHORT") if market_type == "Futures" else ai_action
-                btn_label       = f"🚀 Buka Posisi Simulasi ({pos_type}) — Alokasi ${modal:.0f} USDT"
-                st.markdown("<br>", unsafe_allow_html=True)
-                col_btn, col_bal = st.columns([2, 1])
-                with col_btn:
-                    if st.button(btn_label, use_container_width=True):
-                        if cur_wallet_bal >= modal:
-                            st.session_state[cur_wallet_key] -= modal
-                            st.session_state["sim_history"].append({
-                                "time":   datetime.now().strftime("%H:%M:%S"),
-                                "market": market_type,
-                                "type":   pos_type,
-                                "entry":  g_entry,
-                                "tp1":    g_tp1,
-                                "sl":     g_sl,
-                                "modal":  modal,
-                                "lev":    leverage,
-                            })
-                            st.success(f"✅ Posisi simulasi {pos_type} dicatat! Sisa saldo {market_type}: ${st.session_state[cur_wallet_key]:.2f}")
-                        else:
-                            st.error(f"❌ Saldo simulasi {market_type} tidak cukup (${cur_wallet_bal:.2f} < ${modal:.0f})")
-                with col_bal:
-                    st.markdown(f"""
-                    <div style="background:#161b22; border:1px solid #30363d; border-radius:8px; padding:10px; text-align:center; margin-top:4px;">
-                        <p style="color:#8b949e; font-size:10px; margin:0 0 4px 0;">SALDO SIM {market_type.upper()}</p>
-                        <p style="color:#3fb950; font-size:16px; font-weight:800; margin:0;">${cur_wallet_bal:.2f}</p>
-                    </div>
-                    """, unsafe_allow_html=True)
+            if market_type == "Futures":
+                action_label = "🟡 LONG" if ai_action=="BUY" else "🔴 SHORT"
+                action_color = "#f0883e" if ai_action=="BUY" else "#f85149"
+            else:
+                action_label = f"🟢 {ai_action}" if ai_action=="BUY" else f"🔴 {ai_action}"
+                action_color = "#3fb950" if ai_action=="BUY" else "#f85149"
 
-                dir_word = "LONG di" if ai_action=="BUY" and market_type=="Futures" else "SHORT di" if ai_action=="SELL" and market_type=="Futures" else f"{ai_action} di"
+            plan = True  # flag untuk tampilkan UI
+
+            col_p1, col_p2, col_p3 = st.columns(3)
+            with col_p1:
                 st.markdown(f"""
-                <div style="background:#161b22; border:1px solid #30363d; border-radius:8px; padding:12px; margin-top:8px;">
-                    <p style="color:#8b949e; font-size:12px; margin:0;">
-                    ⚡ <strong style="color:#e6edf3;">Quick Action:</strong>
-                    {dir_word} <strong style="color:#f0883e;">{g_entry:,.4f}</strong> →
-                    SL <strong style="color:#f85149;">{g_sl:,.4f}</strong> →
-                    TP1 <strong style="color:#3fb950;">{g_tp1:,.4f}</strong>
-                    {"→ TP2 " + f"<strong style='color:#3fb950;'>{g_tp2:,.4f}</strong>" if g_tp2 > 0 else ""} |
-                    Est. Profit: <strong style="color:#3fb950;">+${lev_profit1}</strong>
-                    {"(x" + str(leverage) + " leverage)" if market_type=="Futures" else ""}
-                    </p>
+                <div class="tp-card">
+                    <p style="color:#d2a8ff; font-size:11px; text-transform:uppercase; letter-spacing:1px; margin:0 0 12px 0;">✨ Level dari Gemini AI</p>
+                    <div class="tp-row"><span class="tp-label">Posisi</span><span class="tp-value" style="color:{action_color};">{action_label}</span></div>
+                    <div class="tp-row"><span class="tp-label">Entry</span><span class="tp-value tp-yellow">{g_entry:,.4f}</span></div>
+                    <div class="tp-row"><span class="tp-label">Stop Loss</span><span class="tp-value tp-red">{g_sl:,.4f}</span></div>
+                    <div class="tp-row"><span class="tp-label">TP 1</span><span class="tp-value tp-green">{g_tp1:,.4f}</span></div>
+                    <div class="tp-row"><span class="tp-label">TP 2</span><span class="tp-value tp-green">{g_tp2:,.4f}</span></div>
                 </div>
                 """, unsafe_allow_html=True)
-            else:
-                st.info("Level Gemini tidak lengkap — coba refresh.")
+            with col_p2:
+                lev_label = f"{leverage}x" if market_type=="Futures" else "1x (Spot)"
+                st.markdown(f"""
+                <div class="tp-card">
+                    <p style="color:#8b949e; font-size:11px; text-transform:uppercase; letter-spacing:1px; margin:0 0 12px 0;">Risk & Reward</p>
+                    <div class="tp-row"><span class="tp-label">R/R Ratio</span><span class="tp-value" style="color:{rr_color};">1 : {rr_ratio}</span></div>
+                    <div class="tp-row"><span class="tp-label">Modal</span><span class="tp-value">${modal:,.2f} USDT</span></div>
+                    <div class="tp-row"><span class="tp-label">Leverage</span><span class="tp-value" style="color:#f0883e;">{lev_label}</span></div>
+                    <div class="tp-row"><span class="tp-label">Qty</span><span class="tp-value">{qty} {symbol.replace("USDT","")}</span></div>
+                    <div class="tp-row"><span class="tp-label">AI Confidence</span><span class="tp-value" style="color:{conf_color};">{gemini_data.get("confidence",0)}%</span></div>
+                </div>
+                """, unsafe_allow_html=True)
+            with col_p3:
+                pnl_note = f" (x{leverage})" if market_type=="Futures" else ""
+                st.markdown(f"""
+                <div class="tp-card">
+                    <p style="color:#8b949e; font-size:11px; text-transform:uppercase; letter-spacing:1px; margin:0 0 12px 0;">Estimasi P&L{pnl_note}</p>
+                    <div class="tp-row"><span class="tp-label">Profit TP1</span><span class="tp-value tp-green">+${lev_profit1}</span></div>
+                    <div class="tp-row"><span class="tp-label">Profit TP2</span><span class="tp-value tp-green">+${lev_profit2}</span></div>
+                    <div class="tp-row"><span class="tp-label">Max Loss</span><span class="tp-value tp-red">-${lev_loss}</span></div>
+                    <div class="tp-row"><span class="tp-label">Worth it?</span><span class="tp-value" style="color:{rr_color};">{"✅ YES" if rr_ratio>=rr_target else "⚠️ MARGINAL" if rr_ratio>=rr_marginal else "❌ SKIP"}</span></div>
+                </div>
+                """, unsafe_allow_html=True)
+
+            # Sim button
+            cur_wallet_key  = "wallet_futures" if market_type == "Futures" else "wallet_spot"
+            cur_wallet_bal  = st.session_state[cur_wallet_key]
+            pos_type        = ("LONG" if ai_action == "BUY" else "SHORT") if market_type == "Futures" else ai_action
+            btn_label       = f"🚀 Buka Posisi Simulasi ({pos_type}) — Alokasi ${modal:.0f} USDT"
+            st.markdown("<br>", unsafe_allow_html=True)
+            col_btn, col_bal = st.columns([2, 1])
+            with col_btn:
+                if st.button(btn_label, use_container_width=True):
+                    if cur_wallet_bal >= modal:
+                        st.session_state[cur_wallet_key] -= modal
+                        st.session_state["sim_history"].append({
+                            "time":   datetime.now().strftime("%H:%M:%S"),
+                            "market": market_type,
+                            "type":   pos_type,
+                            "entry":  g_entry,
+                            "tp1":    g_tp1,
+                            "sl":     g_sl,
+                            "modal":  modal,
+                            "lev":    leverage,
+                        })
+                        st.success(f"✅ Posisi simulasi {pos_type} dicatat! Sisa saldo {market_type}: ${st.session_state[cur_wallet_key]:.2f}")
+                    else:
+                        st.error(f"❌ Saldo simulasi {market_type} tidak cukup (${cur_wallet_bal:.2f} < ${modal:.0f})")
+            with col_bal:
+                st.markdown(f"""
+                <div style="background:#161b22; border:1px solid #30363d; border-radius:8px; padding:10px; text-align:center; margin-top:4px;">
+                    <p style="color:#8b949e; font-size:10px; margin:0 0 4px 0;">SALDO SIM {market_type.upper()}</p>
+                    <p style="color:#3fb950; font-size:16px; font-weight:800; margin:0;">${cur_wallet_bal:.2f}</p>
+                </div>
+                """, unsafe_allow_html=True)
+
+            dir_word = "LONG di" if ai_action=="BUY" and market_type=="Futures" else "SHORT di" if ai_action=="SELL" and market_type=="Futures" else f"{ai_action} di"
+            st.markdown(f"""
+            <div style="background:#161b22; border:1px solid #30363d; border-radius:8px; padding:12px; margin-top:8px;">
+                <p style="color:#8b949e; font-size:12px; margin:0;">
+                ⚡ <strong style="color:#e6edf3;">Quick Action:</strong>
+                {dir_word} <strong style="color:#f0883e;">{g_entry:,.4f}</strong> →
+                SL <strong style="color:#f85149;">{g_sl:,.4f}</strong> →
+                TP1 <strong style="color:#3fb950;">{g_tp1:,.4f}</strong>
+                {"→ TP2 " + f"<strong style='color:#3fb950;'>{g_tp2:,.4f}</strong>" if g_tp2 > 0 else ""} |
+                Est. Profit: <strong style="color:#3fb950;">+${lev_profit1}</strong>
+                {"(x" + str(leverage) + " leverage)" if market_type=="Futures" else ""}
+                </p>
+            </div>
+            """, unsafe_allow_html=True)
         elif df is not None:
             ai_reason_txt = gemini_data.get("reason","") if gemini_data else ""
             st.info(f"🔵 HOLD — {ai_reason_txt or 'Belum ada setup yang cukup bagus saat ini.'}")
@@ -1424,28 +1436,62 @@ with tab1:
                 </div>
                 """, unsafe_allow_html=True)
 
-    # ── AI Reasoning (di bawah signal, kanan) ──
+    # ── AI Reasoning (Gemini insights atau formula fallback) ──
     if df is not None and price_data is not None:
         with reasoning_container:
-            reasoning_points, reasoning_conclusion, reasoning_color = generate_ai_reasoning(
-                signal, decision, decision_reason, score_detail, indicators, supports, resistances, trading_mode
-            )
             st.markdown("---")
-            st.markdown('<p class="section-header">🧠 AI Reasoning</p>', unsafe_allow_html=True)
-            points_html = "".join([
-                f'<li style="color:#c9d1d9; font-size:13px; margin-bottom:6px; line-height:1.6;">{p}</li>'
-                for p in reasoning_points
-            ])
-            st.markdown(f"""
-            <div style="background:#161b22; border:1px solid #30363d; border-left:4px solid {reasoning_color}; border-radius:8px; padding:18px;">
-                <ul style="margin:0 0 12px 0; padding-left:18px;">{points_html}</ul>
-                <p style="color:{reasoning_color}; font-size:14px; font-weight:700; margin:0; padding-top:10px; border-top:1px solid #21262d;">
-                    {reasoning_conclusion}
-                </p>
-            </div>
-            """, unsafe_allow_html=True)
+            if gemini_data and gemini_data.get("ai_active") and gemini_data.get("insights"):
+                # Tampilkan Gemini insights
+                st.markdown('<p class="section-header">🧠 Gemini AI Reasoning</p>', unsafe_allow_html=True)
+                insights_html = "".join([
+                    f'<li style="color:#c9d1d9;font-size:13px;margin-bottom:8px;line-height:1.6;">{p}</li>'
+                    for p in gemini_data["insights"]
+                ])
+                ai_c = "#3fb950" if gemini_data["action"]=="BUY" else "#f85149" if gemini_data["action"]=="SELL" else "#388bfd"
+                st.markdown(f"""
+                <div style="background:linear-gradient(135deg,#1a1a2e,#16213e);
+                     border:1px solid #0f3460; border-left:4px solid #d2a8ff;
+                     border-radius:8px; padding:18px;">
+                    <ul style="margin:0 0 14px 0; padding-left:18px;">{insights_html}</ul>
+                    <p style="color:{ai_c}; font-size:14px; font-weight:700; margin:0;
+                       padding-top:10px; border-top:1px solid #0f3460;">
+                        {gemini_data.get("reason","")}
+                    </p>
+                </div>
+                """, unsafe_allow_html=True)
+                with st.expander("📊 Formula Reference", expanded=False):
+                    reasoning_points, reasoning_conclusion, reasoning_color = generate_ai_reasoning(
+                        signal, formula_decision, formula_reason,
+                        score_detail, indicators, supports, resistances, trading_mode
+                    )
+                    for p in reasoning_points:
+                        st.markdown(f"• {p}")
+                    st.markdown(f"**{reasoning_conclusion}**")
+            else:
+                # Fallback formula reasoning
+                st.markdown('<p class="section-header">🧠 AI Reasoning</p>', unsafe_allow_html=True)
+                reasoning_points, reasoning_conclusion, reasoning_color = generate_ai_reasoning(
+                    signal, formula_decision, formula_reason,
+                    score_detail, indicators, supports, resistances, trading_mode
+                )
+                points_html = "".join([
+                    f'<li style="color:#c9d1d9;font-size:13px;margin-bottom:6px;line-height:1.6;">{p}</li>'
+                    for p in reasoning_points
+                ])
+                st.markdown(f"""
+                <div style="background:#161b22; border:1px solid #30363d;
+                     border-left:4px solid {reasoning_color}; border-radius:8px; padding:18px;">
+                    <ul style="margin:0 0 12px 0; padding-left:18px;">{points_html}</ul>
+                    <p style="color:{reasoning_color}; font-size:14px; font-weight:700;
+                       margin:0; padding-top:10px; border-top:1px solid #21262d;">
+                        {reasoning_conclusion}
+                    </p>
+                </div>
+                """, unsafe_allow_html=True)
+                if not GEMINI_ENABLED:
+                    st.caption("✨ Tambahkan GEMINI_API_KEY di secrets.toml untuk AI penuh")
 
-            # ── Gemini AI Decision Display ──
+            # ── End reasoning ──
 # ─── TAB 2: MULTI TIMEFRAME ───
 with tab2:
     st.markdown('<p class="section-header">🕐 Multi-Timeframe Analysis</p>', unsafe_allow_html=True)
@@ -1739,7 +1785,7 @@ with tab5:
     st.markdown(f"""
     <div style="background:#161b22; border:1px solid #30363d; border-radius:8px; padding:16px;">
         <p style="color:#8b949e; font-size:12px; margin:0;">
-        Version: <span style="color:#e6edf3;">v4.3 (Fase 3 — Spot + Futures Dual Market)</span><br>
+        Version: <span style="color:#e6edf3;">v4.5 (Fase 3 — Spot + Futures Dual Market)</span><br>
         Exchange: <span style="color:#e6edf3;">Binance Spot & Futures (USDS-M)</span><br>
         Features: <span style="color:#e6edf3;">Dual Mode · Futures LONG/SHORT · Leverage Calc · Real MTF · S&R · Stochastic · EMA200 · Trading Plan · Backtest · Top Gainers</span><br>
         Gemini AI: <span style="color:#e6edf3;">{gemini_status}</span><br>
