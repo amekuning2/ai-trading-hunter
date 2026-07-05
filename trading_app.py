@@ -797,109 +797,122 @@ def generate_ai_reasoning(signal, decision, decision_reason, score_detail, indic
     return points, conclusion, color
 
 # ─────────────────────────────────────────────
-#  GEMINI AI DECISION ENGINE
-#  Enhancement layer: bisa override WAIT→ENTER untuk peluang mikro
-#  Safety rule: tidak bisa override SKIP (score terlalu rendah)
+#  GEMINI FULL BRAIN ENGINE
+#  Gemini = otak utama, formula = safety net tipis
 # ─────────────────────────────────────────────
-@st.cache_data(ttl=120)
-def get_gemini_decision(symbol, interval, trading_mode, signal, formula_decision, score_total,
-                        rsi, macd_val, ema20, ema50, current_price,
-                        supports_str, resistances_str, mtf_context_str, GEMINI_API_KEY,
-                        market_type="Spot", leverage=1):
-    """
-    Return dict:
-      insights        : list[str]  — poin analisis
-      kesimpulan      : str        — ringkasan AI
-      ai_decision     : ENTER/WAIT/SKIP — keputusan final AI
-      ai_reason       : str        — alasan AI
-      is_override     : bool       — apakah AI override rumus
-    """
-    fallback = {
-        "insights": [], "kesimpulan": "",
-        "ai_decision": formula_decision, "ai_reason": "",
-        "is_override": False
+@st.cache_data(ttl=60)
+def get_gemini_full_analysis(symbol, interval, trading_mode,
+                              ohlcv_summary, rsi, macd_val, macd_sig,
+                              ema20, ema50, ema200,
+                              bb_pos, vol_ratio, atr,
+                              current_price, supports_str, resistances_str,
+                              mtf_score, formula_signal, formula_score,
+                              GEMINI_API_KEY, market_type="Spot", leverage=1):
+    empty = {
+        "action":"HOLD","entry":current_price,"tp1":0,"tp2":0,"sl":0,
+        "reason":"Gemini tidak aktif","insights":[],"market_reco":"",
+        "confidence":0,"ai_active":False
     }
     if not GEMINI_API_KEY:
-        return fallback
+        return empty
 
+    # Safety net minimal — hanya block chaos ekstrem
     try:
-        # Aturan override yang boleh dilakukan AI
-        if trading_mode == "Scalping":
-            override_rule = """ATURAN OVERRIDE (Scalping — Agresif, frekuensi tinggi):
-- PRIORITAS: user butuh profit $5/hari dari trade kecil yang sering → jangan terlalu ketat
-- WAIT → boleh override ENTER kalau ada 1+ konfirmasi: momentum kuat ATAU harga di zona S/R ATAU volume surge
-- SKIP (score 44-47) → boleh override ke WAIT kalau ada peluang terlihat
-- SKIP (score <44) → WAJIB tetap SKIP"""
-        elif trading_mode == "Intraday":
-            override_rule = """ATURAN OVERRIDE (Intraday — Balance frekuensi & kualitas):
-- WAIT → boleh override ENTER kalau ada 2+ konfirmasi: trend searah + momentum ok + tidak jauh dari S/R
-- SKIP (score 46-49) → boleh override ke WAIT kalau setup terlihat membaik
-- SKIP (score <46) → WAJIB tetap SKIP
-- Jangan override ke ENTER langsung dari SKIP"""
-        else:
-            override_rule = """ATURAN OVERRIDE (Swing — Selektif, RR besar):
-- WAIT → boleh override ENTER hanya kalau SEMUA konfirmasi terpenuhi: trend kuat + MTF searah + di zona S/R + RR > 1.2
-- SKIP → jangan override, tunggu setup sempurna
-- Mode ini memang jarang entry, itu normal"""
+        if atr > current_price * 0.02:
+            empty["reason"] = "Volatilitas ekstrem — tunggu market stabil"
+            return empty
+    except:
+        pass
 
-        futures_ctx = f"Market: FUTURES {leverage}x — SHORT (SELL) valid selain LONG (BUY)" if market_type == "Futures" else "Market: SPOT — hanya BUY/HOLD valid"
+    if trading_mode == "Aggressive":
+        mode_instr = """MODE: AGGRESSIVE
+- Prioritas: frekuensi entry tinggi, profit kecil tapi rutin
+- Target $5-$25/trade, jangan greedy
+- Kalau ada momentum minimal → langsung rekomendasikan BUY atau SELL
+- HOLD hanya kalau benar-benar flat total"""
+    elif trading_mode == "Scalping":
+        mode_instr = """MODE: SCALPING 15m
+- Cari peluang di TF 15m, TP cepat
+- Lebih longgar tapi tetap ada konfirmasi minimal
+- Target $10-$30/trade"""
+    elif trading_mode == "Intraday":
+        mode_instr = """MODE: INTRADAY
+- Balance kualitas dan frekuensi
+- Butuh 2+ konfirmasi, target $20-$50/trade"""
+    else:
+        mode_instr = """MODE: SWING
+- Selektif, setup harus matang, target $50+/trade"""
 
-        prompt = f"""
-Kamu adalah Decision Engine AI untuk sistem trading hybrid.
-Rumus matematika sudah menghasilkan data presisi, tugasmu adalah memberikan interpretasi kontekstual dan memutuskan apakah keputusan rumus perlu di-override untuk menangkap peluang mikro.
+    futures_ctx = f"Market: FUTURES {leverage}x — SHORT valid selain LONG" if market_type == "Futures" else "Market: SPOT — BUY/HOLD"
 
-DATA TEKNIKAL DARI RUMUS:
-- Symbol: {symbol} | TF: {interval} | Mode: {trading_mode}
-- Signal Rumus: {signal} | Keputusan Rumus: {formula_decision} | Score: {score_total}/100
-- RSI: {rsi} | MACD: {macd_val} | EMA20: {ema20} | EMA50: {ema50}
-- Harga: {current_price} | Support: {supports_str} | Resistance: {resistances_str}
-- MTF: {mtf_context_str} | {futures_ctx}
+    prompt = f"""
+Kamu adalah AI Trading Analyst untuk Crypto/Binance.
+Kamu DECISION MAKER UTAMA — analisis semua data dan kasih keputusan actionable.
 
-TARGET USER: Profit konsisten minimal $5/hari dengan modal kecil.
-Mode aktif: {trading_mode}
-- Scalping: cari peluang mikro yang sering, TP kecil tapi konsisten, entry lebih longgar
-- Intraday: balance antara kualitas dan frekuensi, jangan terlalu kaku
-- Swing: selektif, boleh lewatkan kalau tidak yakin
-Prinsip: lebih baik masuk dengan setup 70% bagus dan kena TP kecil, daripada nunggu setup 100% sempurna yang tidak pernah datang.
+PAIR: {symbol} | TIMEFRAME: {interval} | {futures_ctx}
+HARGA: {current_price}
 
-{override_rule}
+INDIKATOR:
+- RSI(14): {rsi:.1f} {"→ OVERSOLD" if rsi < 30 else "→ OVERBOUGHT" if rsi > 70 else "→ Neutral"}
+- MACD: {macd_val:.6f} vs Signal {macd_sig:.6f} {"→ BULLISH" if macd_val > macd_sig else "→ BEARISH"}
+- EMA20: {ema20:.4f} | EMA50: {ema50:.4f} | EMA200: {ema200:.4f}
+- Bias: {"BULLISH - price above EMA20/50" if current_price > ema20 and current_price > ema50 else "BEARISH - price below EMA20/50" if current_price < ema20 and current_price < ema50 else "MIXED"}
+- BB Position: {bb_pos:.1f}% {"→ Near lower band, potential bounce" if bb_pos < 20 else "→ Near upper band, potential reversal" if bb_pos > 80 else "→ Mid band"}
+- Volume: {vol_ratio:.2f}x avg {"→ SURGE ⚡" if vol_ratio > 1.5 else "→ Normal"}
+- ATR: {atr:.6f}
 
-Balas HANYA format JSON murni tanpa teks lain:
+STRUKTUR:
+- Support: {supports_str}
+- Resistance: {resistances_str}
+- MTF Score: {mtf_score}/15
+
+OHLCV 5 CANDLE TERAKHIR:
+{ohlcv_summary}
+
+FORMULA REF: Signal={formula_signal} | Score={formula_score}/100
+
+{mode_instr}
+
+TUGASMU:
+1. Analisis momentum — ada peluang?
+2. ADA peluang (meski tidak sempurna) → BUY atau SELL
+3. Tidak ada setup sama sekali → HOLD
+4. Kasih entry realistis, TP1 konservatif, TP2 optimis, SL dari noise level
+5. Kalau pair ini tidak menarik → rekomendasikan pair lain
+
+BALAS HANYA JSON:
 {{
-  "ai_decision": "ENTER" atau "WAIT" atau "SKIP",
-  "ai_reason": "alasan singkat keputusan AI (1 kalimat)",
-  "is_override": true atau false,
-  "insights": ["poin analisis 1", "poin analisis 2", "poin analisis 3"],
-  "kesimpulan": "ringkasan akhir singkat"
+    "action": "BUY"/"SELL"/"HOLD",
+    "confidence": 0-100,
+    "entry": harga_entry,
+    "tp1": harga_tp1,
+    "tp2": harga_tp2,
+    "sl": harga_sl,
+    "reason": "alasan singkat 1-2 kalimat bahasa Indonesia santai",
+    "insights": ["analisis momentum","analisis struktur","analisis risiko"],
+    "market_reco": "rekomendasi pair lain kalau pair ini tidak menarik, atau string kosong"
 }}
 """
-        model    = genai.GenerativeModel("gemini-3.1-flash-lite")
-        response = model.generate_content(prompt, generation_config={"response_mime_type": "application/json"})
+    try:
+        model    = genai.GenerativeModel("gemini-1.5-flash")
+        response = model.generate_content(prompt, generation_config={"response_mime_type":"application/json"})
         data     = json.loads(response.text.strip())
-
-        # Safety floor per mode
-        floor_map = {"Scalping": 44, "Intraday": 46, "Swing": 52}
-        min_skip_override = floor_map.get(trading_mode, 46)
-        if formula_decision == "SKIP" and score_total < min_skip_override:
-            data["ai_decision"] = "SKIP"
-            data["is_override"] = False
-            data["ai_reason"]   = f"Score {score_total} di bawah floor {min_skip_override} — tetap SKIP."
-
-        # Kalau signal HOLD, AI tidak bisa paksa ENTER
-        if signal == "HOLD":
-            data["ai_decision"] = "SKIP"
-            data["is_override"] = False
-
         return {
-            "insights":    data.get("insights", []),
-            "kesimpulan":  data.get("kesimpulan", ""),
-            "ai_decision": data.get("ai_decision", formula_decision),
-            "ai_reason":   data.get("ai_reason", ""),
-            "is_override": data.get("is_override", False),
+            "action":      data.get("action","HOLD"),
+            "confidence":  int(data.get("confidence",0)),
+            "entry":       float(data.get("entry", current_price)),
+            "tp1":         float(data.get("tp1",0)),
+            "tp2":         float(data.get("tp2",0)),
+            "sl":          float(data.get("sl",0)),
+            "reason":      data.get("reason",""),
+            "insights":    data.get("insights",[]),
+            "market_reco": data.get("market_reco",""),
+            "ai_active":   True
         }
     except Exception as e:
-        fallback["insights"] = [f"Gemini tidak tersedia: {str(e)}"]
-        return fallback
+        empty["reason"] = f"Gemini error: {str(e)}"
+        return empty
+
 
 # ─────────────────────────────────────────────
 #  CHART GENERATOR
@@ -1258,7 +1271,7 @@ with tab1:
         st.markdown('<p class="section-header">📋 Trading Plan</p>', unsafe_allow_html=True)
         modal = st.number_input("💵 Modal (USDT)", min_value=1.0, value=10.0, step=5.0, format="%.2f")
 
-        if df is not None and price_data is not None and decision == "ENTER":
+        if df is not None and price_data is not None and gemini_data and gemini_data.get("ai_active") and ai_action in ("BUY","SELL"):
             plan = generate_trading_plan(df, price_data, signal, supports, resistances, modal_usdt=modal, trading_mode=trading_mode)
 
             if plan:
@@ -1268,64 +1281,58 @@ with tab1:
                     rr_target, rr_marginal = 0.8, 0.6
                 else:
                     rr_target, rr_marginal = 1.2, 0.9
-                rr_color    = "#3fb950" if plan["rr_ratio"] >= rr_target else "#f0883e" if plan["rr_ratio"] >= rr_marginal else "#f85149"
+                rr_color     = "#3fb950" if rr_ratio >= rr_target else "#f0883e" if rr_ratio >= rr_marginal else "#f85149"
+                lev_profit1  = round(profit_tp1 * leverage, 2)
+                lev_profit2  = round(profit_tp2 * leverage, 2)
+                lev_loss     = round(loss_sl * leverage, 2)
 
-                # Label aksi: Futures pakai LONG/SHORT, Spot pakai BUY/SELL
                 if market_type == "Futures":
-                    action_label = "🟡 LONG (BUY)" if plan["signal"] == "BUY" else "🔴 SHORT (SELL)"
-                    action_color = "#f0883e" if plan["signal"] == "BUY" else "#f85149"
+                    action_label = f"🟡 LONG" if ai_action=="BUY" else "🔴 SHORT"
+                    action_color = "#f0883e" if ai_action=="BUY" else "#f85149"
                 else:
-                    action_label = f"🟢 {plan['signal']}" if plan["signal"] == "BUY" else f"🔴 {plan['signal']}"
-                    action_color = "#3fb950" if plan["signal"] == "BUY" else "#f85149"
-
-                # P&L dengan leverage
-                lev_profit_tp1 = round(plan["profit_tp1"] * leverage, 2)
-                lev_profit_tp2 = round(plan["profit_tp2"] * leverage, 2)
-                lev_profit_tp3 = round(plan["profit_tp3"] * leverage, 2)
-                lev_loss_sl    = round(plan["loss_sl"]    * leverage, 2)
+                    action_label = f"🟢 {ai_action}" if ai_action=="BUY" else f"🔴 {ai_action}"
+                    action_color = "#3fb950" if ai_action=="BUY" else "#f85149"
 
                 col_p1, col_p2, col_p3 = st.columns(3)
                 with col_p1:
                     st.markdown(f"""
                     <div class="tp-card">
-                        <p style="color:#8b949e; font-size:11px; text-transform:uppercase; letter-spacing:1px; margin:0 0 12px 0;">Entry & Exit</p>
+                        <p style="color:#d2a8ff; font-size:11px; text-transform:uppercase; letter-spacing:1px; margin:0 0 12px 0;">✨ Level dari Gemini AI</p>
                         <div class="tp-row"><span class="tp-label">Posisi</span><span class="tp-value" style="color:{action_color};">{action_label}</span></div>
-                        <div class="tp-row"><span class="tp-label">Entry Price</span><span class="tp-value tp-yellow">${plan["entry"]:,.4f}</span></div>
-                        <div class="tp-row"><span class="tp-label">Stop Loss</span><span class="tp-value tp-red">${plan["sl"]:,.4f} (-{plan["sl_pct"]}%)</span></div>
-                        <div class="tp-row"><span class="tp-label">TP 1</span><span class="tp-value tp-green">${plan["tp1"]:,.4f} (+{plan["tp1_pct"]}%)</span></div>
-                        <div class="tp-row"><span class="tp-label">TP 2</span><span class="tp-value tp-green">${plan["tp2"]:,.4f} (+{plan["tp2_pct"]}%)</span></div>
-                        <div class="tp-row"><span class="tp-label">TP 3</span><span class="tp-value tp-green">${plan["tp3"]:,.4f} (+{plan["tp3_pct"]}%)</span></div>
+                        <div class="tp-row"><span class="tp-label">Entry</span><span class="tp-value tp-yellow">{g_entry:,.4f}</span></div>
+                        <div class="tp-row"><span class="tp-label">Stop Loss</span><span class="tp-value tp-red">{g_sl:,.4f}</span></div>
+                        <div class="tp-row"><span class="tp-label">TP 1</span><span class="tp-value tp-green">{g_tp1:,.4f}</span></div>
+                        <div class="tp-row"><span class="tp-label">TP 2</span><span class="tp-value tp-green">{g_tp2:,.4f}</span></div>
                     </div>
                     """, unsafe_allow_html=True)
                 with col_p2:
-                    lev_label = f"{leverage}x" if market_type == "Futures" else "1x (Spot)"
+                    lev_label = f"{leverage}x" if market_type=="Futures" else "1x (Spot)"
                     st.markdown(f"""
                     <div class="tp-card">
                         <p style="color:#8b949e; font-size:11px; text-transform:uppercase; letter-spacing:1px; margin:0 0 12px 0;">Risk & Reward</p>
-                        <div class="tp-row"><span class="tp-label">R/R Ratio</span><span class="tp-value" style="color:{rr_color};">1 : {plan["rr_ratio"]}</span></div>
-                        <div class="tp-row"><span class="tp-label">ATR</span><span class="tp-value">${plan["atr"]:,.4f}</span></div>
-                        <div class="tp-row"><span class="tp-label">Modal / Margin</span><span class="tp-value">${plan["modal"]:,.2f} USDT</span></div>
+                        <div class="tp-row"><span class="tp-label">R/R Ratio</span><span class="tp-value" style="color:{rr_color};">1 : {rr_ratio}</span></div>
+                        <div class="tp-row"><span class="tp-label">Modal</span><span class="tp-value">${modal:,.2f} USDT</span></div>
                         <div class="tp-row"><span class="tp-label">Leverage</span><span class="tp-value" style="color:#f0883e;">{lev_label}</span></div>
-                        <div class="tp-row"><span class="tp-label">Qty</span><span class="tp-value">{plan["qty"]} {symbol.replace("USDT","")}</span></div>
+                        <div class="tp-row"><span class="tp-label">Qty</span><span class="tp-value">{qty} {symbol.replace("USDT","")}</span></div>
+                        <div class="tp-row"><span class="tp-label">AI Confidence</span><span class="tp-value" style="color:{conf_color};">{gemini_data.get("confidence",0)}%</span></div>
                     </div>
                     """, unsafe_allow_html=True)
                 with col_p3:
-                    pnl_note = f" (x{leverage})" if market_type == "Futures" else ""
+                    pnl_note = f" (x{leverage})" if market_type=="Futures" else ""
                     st.markdown(f"""
                     <div class="tp-card">
                         <p style="color:#8b949e; font-size:11px; text-transform:uppercase; letter-spacing:1px; margin:0 0 12px 0;">Estimasi P&L{pnl_note}</p>
-                        <div class="tp-row"><span class="tp-label">Profit TP1</span><span class="tp-value tp-green">+${lev_profit_tp1}</span></div>
-                        <div class="tp-row"><span class="tp-label">Profit TP2</span><span class="tp-value tp-green">+${lev_profit_tp2}</span></div>
-                        <div class="tp-row"><span class="tp-label">Profit TP3</span><span class="tp-value tp-green">+${lev_profit_tp3}</span></div>
-                        <div class="tp-row"><span class="tp-label">Max Loss</span><span class="tp-value tp-red">-${lev_loss_sl}</span></div>
-                        <div class="tp-row"><span class="tp-label">Worth it?</span><span class="tp-value" style="color:{rr_color};">{"✅ YES" if plan["rr_ratio"] >= rr_target else "⚠️ MARGINAL" if plan["rr_ratio"] >= rr_marginal else "❌ NO"}</span></div>
+                        <div class="tp-row"><span class="tp-label">Profit TP1</span><span class="tp-value tp-green">+${lev_profit1}</span></div>
+                        <div class="tp-row"><span class="tp-label">Profit TP2</span><span class="tp-value tp-green">+${lev_profit2}</span></div>
+                        <div class="tp-row"><span class="tp-label">Max Loss</span><span class="tp-value tp-red">-${lev_loss}</span></div>
+                        <div class="tp-row"><span class="tp-label">Worth it?</span><span class="tp-value" style="color:{rr_color};">{"✅ YES" if rr_ratio>=rr_target else "⚠️ MARGINAL" if rr_ratio>=rr_marginal else "❌ SKIP"}</span></div>
                     </div>
                     """, unsafe_allow_html=True)
 
                 # Sim button
                 cur_wallet_key  = "wallet_futures" if market_type == "Futures" else "wallet_spot"
                 cur_wallet_bal  = st.session_state[cur_wallet_key]
-                pos_type        = ("LONG" if plan["signal"] == "BUY" else "SHORT") if market_type == "Futures" else plan["signal"]
+                pos_type        = ("LONG" if ai_action == "BUY" else "SHORT") if market_type == "Futures" else ai_action
                 btn_label       = f"🚀 Buka Posisi Simulasi ({pos_type}) — Alokasi ${modal:.0f} USDT"
                 st.markdown("<br>", unsafe_allow_html=True)
                 col_btn, col_bal = st.columns([2, 1])
@@ -1337,9 +1344,9 @@ with tab1:
                                 "time":   datetime.now().strftime("%H:%M:%S"),
                                 "market": market_type,
                                 "type":   pos_type,
-                                "entry":  plan["entry"],
-                                "tp1":    plan["tp1"],
-                                "sl":     plan["sl"],
+                                "entry":  g_entry,
+                                "tp1":    g_tp1,
+                                "sl":     g_sl,
                                 "modal":  modal,
                                 "lev":    leverage,
                             })
@@ -1354,23 +1361,31 @@ with tab1:
                     </div>
                     """, unsafe_allow_html=True)
 
+                dir_word = "LONG di" if ai_action=="BUY" and market_type=="Futures" else "SHORT di" if ai_action=="SELL" and market_type=="Futures" else f"{ai_action} di"
                 st.markdown(f"""
                 <div style="background:#161b22; border:1px solid #30363d; border-radius:8px; padding:12px; margin-top:8px;">
                     <p style="color:#8b949e; font-size:12px; margin:0;">
-                    💡 <strong style="color:#e6edf3;">Cara pakai:</strong>
-                    {"Buka posisi " + pos_type + " di" if market_type == "Futures" else "Entry di"} <strong style="color:#f0883e;">${plan["entry"]:,.4f}</strong> →
-                    Pasang SL di <strong style="color:#f85149;">${plan["sl"]:,.4f}</strong> →
-                    TP sebagian di <strong style="color:#3fb950;">${plan["tp1"]:,.4f}</strong>.
-                    R/R <strong style="color:{rr_color};">1:{plan["rr_ratio"]}</strong>
-                    {"| Leverage " + str(leverage) + "x → Efektif profit TP1: +$" + str(lev_profit_tp1) if market_type == "Futures" else ""}
-                    {"— worth it! ✅" if plan["rr_ratio"] >= rr_target else "— pertimbangkan ⚠️" if plan["rr_ratio"] >= rr_marginal else "— skip ❌"}
+                    ⚡ <strong style="color:#e6edf3;">Quick Action:</strong>
+                    {dir_word} <strong style="color:#f0883e;">{g_entry:,.4f}</strong> →
+                    SL <strong style="color:#f85149;">{g_sl:,.4f}</strong> →
+                    TP1 <strong style="color:#3fb950;">{g_tp1:,.4f}</strong>
+                    {"→ TP2 " + f"<strong style='color:#3fb950;'>{g_tp2:,.4f}</strong>" if g_tp2 > 0 else ""} |
+                    Est. Profit: <strong style="color:#3fb950;">+${lev_profit1}</strong>
+                    {"(x" + str(leverage) + " leverage)" if market_type=="Futures" else ""}
                     </p>
                 </div>
                 """, unsafe_allow_html=True)
             else:
-                st.info("⏳ Sinyal HOLD — Trading plan tidak tersedia.")
-        elif df is not None and price_data is not None:
-            st.warning(f"Trading Plan dikunci — keputusan AI: {decision}. {decision_reason}")
+                st.info("Level Gemini tidak lengkap — coba refresh.")
+        elif df is not None:
+            ai_reason_txt = gemini_data.get("reason","") if gemini_data else ""
+            st.info(f"🔵 HOLD — {ai_reason_txt or 'Belum ada setup yang cukup bagus saat ini.'}")
+            if gemini_data and gemini_data.get("market_reco"):
+                st.markdown(f"""
+                <div style="background:#1b1f2d;border:1px solid #388bfd;border-radius:8px;padding:10px 14px;margin-top:8px;">
+                    <p style="color:#388bfd;font-size:13px;margin:0;">💡 <strong>Coba pair/token lain:</strong> {gemini_data["market_reco"]}</p>
+                </div>
+                """, unsafe_allow_html=True)
 
     # ── AI Reasoning (di bawah signal, kanan) ──
     if df is not None and price_data is not None:
@@ -1729,7 +1744,7 @@ with tab5:
     st.markdown(f"""
     <div style="background:#161b22; border:1px solid #30363d; border-radius:8px; padding:16px;">
         <p style="color:#8b949e; font-size:12px; margin:0;">
-        Version: <span style="color:#e6edf3;">v3.7 (Fase 3 — Spot + Futures Dual Market)</span><br>
+        Version: <span style="color:#e6edf3;">v4.0 (Fase 3 — Spot + Futures Dual Market)</span><br>
         Exchange: <span style="color:#e6edf3;">Binance Spot & Futures (USDS-M)</span><br>
         Features: <span style="color:#e6edf3;">Dual Mode · Futures LONG/SHORT · Leverage Calc · Real MTF · S&R · Stochastic · EMA200 · Trading Plan · Backtest · Top Gainers</span><br>
         Gemini AI: <span style="color:#e6edf3;">{gemini_status}</span><br>
