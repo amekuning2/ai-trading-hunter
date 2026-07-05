@@ -894,7 +894,7 @@ BALAS HANYA JSON:
 }}
 """
     try:
-        model    = genai.GenerativeModel("gemini-1.5-flash")
+        model    = genai.GenerativeModel("gemini-3.1-flash-lite")
         response = model.generate_content(prompt, generation_config={"response_mime_type":"application/json"})
         data     = json.loads(response.text.strip())
         return {
@@ -1136,72 +1136,109 @@ with tab1:
                 signal, score_detail, df, supports, resistances, trading_mode
             )
 
-            # ── GEMINI DECISION ENGINE (override layer) ──
-            gemini_result = None
+            # ── GEMINI FULL BRAIN — otak utama ──
+            close = df["close"]
+            _rsi    = indicators.get("RSI", 0)
+            _macd   = indicators.get("MACD", 0)
+            _macd_s = ta.trend.MACD(close).macd_signal().iloc[-1]
+            _ema20  = indicators.get("EMA20", 0)
+            _ema50  = indicators.get("EMA50", 0)
+            _ema200 = indicators.get("EMA200", price)
+            _bb     = ta.volatility.BollingerBands(close, window=20)
+            _bb_pos = ((price - _bb.bollinger_lband().iloc[-1]) / max(_bb.bollinger_hband().iloc[-1] - _bb.bollinger_lband().iloc[-1], 0.0001)) * 100
+            _atr    = ta.volatility.AverageTrueRange(df["high"], df["low"], close, window=14).average_true_range().iloc[-1]
+            _vol_r  = df["volume"].iloc[-1] / max(df["volume"].rolling(20).mean().iloc[-1], 0.0001)
+            _ohlcv  = "\n".join([
+                f"  [{i}] O={row.open:.4f} H={row.high:.4f} L={row.low:.4f} C={row.close:.4f}"
+                for i, row in enumerate(df.tail(5).itertuples())
+            ])
+
+            gemini_data = None
             if GEMINI_ENABLED:
-                gemini_result = get_gemini_decision(
-                    symbol=symbol,
-                    interval=interval_val,
-                    trading_mode=trading_mode,
-                    signal=signal,
-                    formula_decision=formula_decision,
-                    score_total=score_detail["total"],
-                    rsi=indicators.get("RSI", 0),
-                    macd_val=indicators.get("MACD", 0),
-                    ema20=indicators.get("EMA20", 0),
-                    ema50=indicators.get("EMA50", 0),
+                gemini_data = get_gemini_full_analysis(
+                    symbol=symbol, interval=interval_val, trading_mode=trading_mode,
+                    ohlcv_summary=_ohlcv,
+                    rsi=_rsi, macd_val=_macd, macd_sig=_macd_s,
+                    ema20=_ema20, ema50=_ema50, ema200=_ema200,
+                    bb_pos=_bb_pos, vol_ratio=_vol_r, atr=_atr,
                     current_price=price,
-                    supports_str=str(supports),
-                    resistances_str=str(resistances),
-                    mtf_context_str=f"MTF Score {mtf_real}/15",
+                    supports_str=str(supports), resistances_str=str(resistances),
+                    mtf_score=mtf_real,
+                    formula_signal=signal, formula_score=score_detail["total"],
                     GEMINI_API_KEY=GEMINI_API_KEY,
-                    market_type=market_type,
-                    leverage=leverage,
+                    market_type=market_type, leverage=leverage,
                 )
 
-            # Final decision: AI override kalau ada, fallback ke formula
-            if gemini_result and gemini_result["ai_decision"]:
-                decision        = gemini_result["ai_decision"]
-                is_override     = gemini_result["is_override"]
-                override_reason = gemini_result["ai_reason"]
-                if is_override:
-                    decision_reason = f"🤖 AI Override: {override_reason}"
-                    decision_color  = "#d2a8ff"  # ungu = AI override
-                else:
-                    decision_reason = formula_reason if not override_reason else override_reason
-                    decision_color  = formula_color
+            # Render signal card berdasarkan Gemini
+            if gemini_data and gemini_data.get("ai_active"):
+                ai_action   = gemini_data["action"]
+                ai_conf     = gemini_data["confidence"]
+                ai_reason   = gemini_data["reason"]
+                ai_reco     = gemini_data.get("market_reco","")
+                action_color= "#3fb950" if ai_action=="BUY" else "#f85149" if ai_action=="SELL" else "#388bfd"
+                action_emoji= "🟢" if ai_action=="BUY" else "🔴" if ai_action=="SELL" else "🔵"
+                action_bg   = "rgba(63,185,80,0.12)" if ai_action=="BUY" else "rgba(248,81,73,0.12)" if ai_action=="SELL" else "rgba(56,139,253,0.08)"
+                conf_color  = "#3fb950" if ai_conf>=70 else "#f0883e" if ai_conf>=50 else "#f85149"
+
+                st.markdown(f"""
+                <div style="background:{action_bg};border:1px solid {action_color};
+                     border-left:5px solid {action_color};border-radius:10px;padding:20px;text-align:center;">
+                    <p style="color:#8b949e;font-size:10px;text-transform:uppercase;letter-spacing:2px;margin:0;">🤖 Gemini AI Decision</p>
+                    <p style="font-size:36px;font-weight:900;color:{action_color};margin:8px 0;letter-spacing:3px;">{action_emoji} {ai_action}</p>
+                    <p style="color:#c9d1d9;font-size:13px;margin:0 0 12px 0;">{ai_reason}</p>
+                    <div class="strength-bar-container">
+                        <div class="strength-bar-fill" style="width:{ai_conf}%;background:{conf_color};"></div>
+                    </div>
+                    <p style="color:#8b949e;font-size:11px;margin:4px 0 0 0;">AI Confidence: {ai_conf}%</p>
+                </div>
+                """, unsafe_allow_html=True)
+
+                if ai_reco:
+                    st.markdown(f"""
+                    <div style="background:#1b1f2d;border:1px solid #388bfd;border-radius:8px;padding:10px 14px;margin-top:10px;">
+                        <p style="color:#388bfd;font-size:12px;margin:0;">💡 <strong>AI Reco:</strong> {ai_reco}</p>
+                    </div>
+                    """, unsafe_allow_html=True)
+
+                if ai_action != "HOLD":
+                    st.markdown("<br>", unsafe_allow_html=True)
+                    st.markdown('<p class="section-header">🎯 Level dari Gemini AI</p>', unsafe_allow_html=True)
+                    tp_c = "#3fb950" if ai_action=="BUY" else "#f85149"
+                    sl_c = "#f85149" if ai_action=="BUY" else "#3fb950"
+                    st.markdown(f"""
+                    <div class="tp-card">
+                        <div class="tp-row"><span class="tp-label">Entry</span><span class="tp-value tp-yellow">{gemini_data["entry"]:,.4f}</span></div>
+                        <div class="tp-row"><span class="tp-label">TP 1</span><span class="tp-value" style="color:{tp_c};">{gemini_data["tp1"]:,.4f}</span></div>
+                        <div class="tp-row"><span class="tp-label">TP 2</span><span class="tp-value" style="color:{tp_c};">{gemini_data["tp2"]:,.4f}</span></div>
+                        <div class="tp-row"><span class="tp-label">Stop Loss</span><span class="tp-value" style="color:{sl_c};">{gemini_data["sl"]:,.4f}</span></div>
+                        <div class="tp-row"><span class="tp-label">Formula Ref</span><span class="tp-value" style="color:#8b949e;font-size:11px;">{signal} | {score_detail["total"]}/100</span></div>
+                    </div>
+                    """, unsafe_allow_html=True)
             else:
-                decision        = formula_decision
-                decision_reason = formula_reason
-                decision_color  = formula_color
-                is_override     = False
-
-            signal_class   = f"signal-{signal.lower()}"
-            signal_emoji   = "🟢" if signal == "BUY" else "🔴" if signal == "SELL" else "🔵"
-            strength_color = "#3fb950" if signal == "BUY" else "#f85149" if signal == "SELL" else "#388bfd"
-            decision_emoji = "🟢" if decision == "ENTER" else "🟡" if decision == "WAIT" else "🔴"
-            decision_bg    = "rgba(63,185,80,0.12)"  if decision == "ENTER" else \
-                             "rgba(240,136,62,0.12)" if decision == "WAIT"  else "rgba(248,81,73,0.08)"
-            override_badge = f'<span style="font-size:10px; background:#2d1f3d; color:#d2a8ff; border:1px solid #6e40c9; border-radius:4px; padding:2px 6px; margin-left:6px;">✨ AI Override</span>' if is_override else ""
-
-            st.markdown(f"""
-            <div class="{signal_class}">
-                <p class="signal-text">{signal_emoji} {signal}</p>
-                <p class="signal-reason">{reason}</p>
-                <div class="strength-bar-container">
-                    <div class="strength-bar-fill" style="width:{confidence}%; background:{strength_color};"></div>
+                # Fallback formula
+                ai_action   = "HOLD"
+                conf_color  = "#8b949e"
+                action_color= "#3fb950" if signal=="BUY" else "#f85149" if signal=="SELL" else "#388bfd"
+                dec_emoji   = "🟢" if formula_decision=="ENTER" else "🟡" if formula_decision=="WAIT" else "🔴"
+                dec_bg      = "rgba(63,185,80,0.12)" if formula_decision=="ENTER" else "rgba(240,136,62,0.12)" if formula_decision=="WAIT" else "rgba(248,81,73,0.08)"
+                st.markdown(f"""
+                <div class="signal-{signal.lower()}">
+                    <p class="signal-text">{"🟢" if signal=="BUY" else "🔴" if signal=="SELL" else "🔵"} {signal}</p>
+                    <p class="signal-reason">{reason}</p>
+                    <div class="strength-bar-container">
+                        <div class="strength-bar-fill" style="width:{confidence}%;background:{action_color};"></div>
+                    </div>
+                    <p style="color:#8b949e;font-size:11px;">Score: {score_detail["total"]}/100</p>
+                    <div style="margin-top:14px;background:{dec_bg};border:1px solid {formula_color};border-radius:6px;padding:10px 12px;text-align:center;">
+                        <p style="font-size:18px;font-weight:900;color:{formula_color};margin:0;">{dec_emoji} {formula_decision}</p>
+                        <p style="color:#8b949e;font-size:11px;margin:4px 0 0 0;">{formula_reason}</p>
+                    </div>
                 </div>
-                <p style="color:#8b949e; font-size:11px;">Formula Score: {score_detail["total"]}/100 | Confidence: {confidence}%</p>
-                <div style="margin-top:14px; background:{decision_bg}; border:1px solid {decision_color};
-                     border-radius:6px; padding:10px 12px; text-align:center;">
-                    <p style="font-size:18px; font-weight:900; color:{decision_color}; margin:0; letter-spacing:3px;">
-                        {decision_emoji} {decision}{override_badge}
-                    </p>
-                    <p style="color:#8b949e; font-size:11px; margin:4px 0 0 0;">{decision_reason}</p>
+                <div style="background:#161b22;border:1px solid #30363d;border-radius:8px;padding:10px;margin-top:8px;text-align:center;">
+                    <p style="color:#8b949e;font-size:11px;margin:0;">✨ Tambahkan GEMINI_API_KEY untuk Full AI</p>
                 </div>
-            </div>
-            """, unsafe_allow_html=True)
-
+                """, unsafe_allow_html=True)
+                gemini_data = None
             reasoning_container = st.container()
 
             # Score Breakdown
@@ -1409,48 +1446,6 @@ with tab1:
             """, unsafe_allow_html=True)
 
             # ── Gemini AI Decision Display ──
-            if GEMINI_ENABLED and gemini_result:
-                st.markdown("---")
-                override_header = "✨ Gemini AI — Decision Override Active" if is_override else "✨ Gemini AI Insights"
-                st.markdown(f'<p class="section-header">{override_header}</p>', unsafe_allow_html=True)
-
-                # Tampilkan formula vs AI decision kalau ada override
-                if is_override:
-                    f_emoji = "🟢" if formula_decision == "ENTER" else "🟡" if formula_decision == "WAIT" else "🔴"
-                    a_emoji = "🟢" if decision == "ENTER" else "🟡" if decision == "WAIT" else "🔴"
-                    st.markdown(f"""
-                    <div style="background:#1a0f2e; border:1px solid #6e40c9; border-radius:8px; padding:12px; margin-bottom:10px;">
-                        <p style="color:#d2a8ff; font-size:12px; font-weight:700; margin:0 0 8px 0;">⚡ OVERRIDE AKTIF</p>
-                        <div style="display:flex; gap:16px; font-size:13px;">
-                            <div style="flex:1; text-align:center; opacity:0.6;">
-                                <p style="color:#8b949e; margin:0; font-size:10px;">FORMULA ASLI</p>
-                                <p style="color:#8b949e; font-size:16px; font-weight:700; margin:4px 0;">{f_emoji} {formula_decision}</p>
-                                <p style="color:#8b949e; font-size:10px; margin:0;">{formula_reason[:40]}...</p>
-                            </div>
-                            <div style="color:#6e40c9; font-size:20px; display:flex; align-items:center;">→</div>
-                            <div style="flex:1; text-align:center;">
-                                <p style="color:#d2a8ff; margin:0; font-size:10px;">AI DECISION</p>
-                                <p style="color:#d2a8ff; font-size:16px; font-weight:700; margin:4px 0;">{a_emoji} {decision}</p>
-                                <p style="color:#d2a8ff; font-size:10px; margin:0;">{gemini_result["ai_reason"][:40]}...</p>
-                            </div>
-                        </div>
-                    </div>
-                    """, unsafe_allow_html=True)
-
-                insights_html = "".join([
-                    f'<li style="color:#c9d1d9; font-size:13px; margin-bottom:6px; line-height:1.6;">{p}</li>'
-                    for p in gemini_result.get("insights", [])
-                ])
-                kesimpulan = gemini_result.get("kesimpulan", "")
-                if insights_html:
-                    border_color = "#6e40c9" if is_override else "#0f3460"
-                    st.markdown(f"""
-                    <div class="gemini-card" style="border-left-color:{"#d2a8ff" if is_override else "#d2a8ff"};">
-                        <ul style="margin:0 0 12px 0; padding-left:18px;">{insights_html}</ul>
-                        {"<p style='color:#d2a8ff; font-size:14px; font-weight:700; margin:0; padding-top:10px; border-top:1px solid " + border_color + ";'>" + kesimpulan + "</p>" if kesimpulan else ""}
-                    </div>
-                    """, unsafe_allow_html=True)
-
 # ─── TAB 2: MULTI TIMEFRAME ───
 with tab2:
     st.markdown('<p class="section-header">🕐 Multi-Timeframe Analysis</p>', unsafe_allow_html=True)
