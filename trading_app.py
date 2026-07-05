@@ -1268,7 +1268,7 @@ with tab1:
             st.markdown(f"""
             <div style="display:flex; justify-content:space-between; padding:6px 0; border-top:1px solid #30363d; margin-top:4px;">
                 <span style="color:#e6edf3; font-size:12px; font-weight:700;">TOTAL</span>
-                <span style="color:{strength_color}; font-size:14px; font-weight:800;">{confidence}/100</span>
+                <span style="color:{action_color}; font-size:14px; font-weight:800;">{confidence}/100</span>
             </div>
             """, unsafe_allow_html=True)
 
@@ -1739,7 +1739,7 @@ with tab5:
     st.markdown(f"""
     <div style="background:#161b22; border:1px solid #30363d; border-radius:8px; padding:16px;">
         <p style="color:#8b949e; font-size:12px; margin:0;">
-        Version: <span style="color:#e6edf3;">v4.0 (Fase 3 — Spot + Futures Dual Market)</span><br>
+        Version: <span style="color:#e6edf3;">v4.3 (Fase 3 — Spot + Futures Dual Market)</span><br>
         Exchange: <span style="color:#e6edf3;">Binance Spot & Futures (USDS-M)</span><br>
         Features: <span style="color:#e6edf3;">Dual Mode · Futures LONG/SHORT · Leverage Calc · Real MTF · S&R · Stochastic · EMA200 · Trading Plan · Backtest · Top Gainers</span><br>
         Gemini AI: <span style="color:#e6edf3;">{gemini_status}</span><br>
