@@ -1721,7 +1721,7 @@ with tab5:
             📊 Leverage: <span style="color:#e6edf3;">1:{account.leverage}</span><br>
             🔗 Status: <span style="color:#3fb950;">🟢 Connected</span><br>
             ✨ Gemini: <span style="color:#e6edf3;">{"🟢 Aktif" if GEMINI_ENABLED else "🔴 Tidak aktif"}</span><br>
-            Ⓥ Version: <span style="color:#e6edf3;">v4.0 (3-Mode + Gemini Decision Engine)</span><br>
+            ⚙️ Version: <span style="color:#e6edf3;">v4.2 (3-Mode + Gemini Decision Engine)</span><br>
             </p>
         </div>
         """, unsafe_allow_html=True)

@@ -894,7 +894,7 @@ BALAS HANYA JSON:
 }}
 """
     try:
-        model    = genai.GenerativeModel("gemini-2.0-flash")
+        model    = genai.GenerativeModel("gemini-3.1-flash-lite")
         response = model.generate_content(prompt, generation_config={"response_mime_type":"application/json"})
         data     = json.loads(response.text.strip())
         return {
@@ -1785,7 +1785,7 @@ with tab5:
     st.markdown(f"""
     <div style="background:#161b22; border:1px solid #30363d; border-radius:8px; padding:16px;">
         <p style="color:#8b949e; font-size:12px; margin:0;">
-        Version: <span style="color:#e6edf3;">v4.5 (Fase 3 — Spot + Futures Dual Market)</span><br>
+        Version: <span style="color:#e6edf3;">v4.6 (Fase 3 — Spot + Futures Dual Market)</span><br>
         Exchange: <span style="color:#e6edf3;">Binance Spot & Futures (USDS-M)</span><br>
         Features: <span style="color:#e6edf3;">Dual Mode · Futures LONG/SHORT · Leverage Calc · Real MTF · S&R · Stochastic · EMA200 · Trading Plan · Backtest · Top Gainers</span><br>
         Gemini AI: <span style="color:#e6edf3;">{gemini_status}</span><br>
