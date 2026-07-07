@@ -10,14 +10,18 @@ import json
 import plotly.graph_objects as go
 
 # ─────────────────────────────────────────────────────────────────────────────
-#  1. UI OVERHAUL: MOBILE-FIRST APP STYLE
+#  1. CONFIG & THEME SETUP
 # ─────────────────────────────────────────────────────────────────────────────
-st.set_page_config(page_title="MT5 AI Dashboard V1.5", page_icon="⚡", layout="centered")
+st.set_page_config(
+    page_title="MT5 AI Simple Dashboard v2.0",
+    page_icon="⚡",
+    layout="centered",
+    initial_sidebar_state="collapsed"
+)
 
 st.markdown("""
 <style>
-    .stApp { background-color: #0d1117; color: #e6edf3; font-family: sans-serif; }
-    /* Card UI */
+    .stApp { background-color: #0d1117; color: #e6edf3; }
     .card { background: #161b22; border: 1px solid #30363d; border-radius: 12px; padding: 16px; margin-bottom: 15px; }
     .header-text { font-size: 24px; font-weight: bold; text-align: center; margin-bottom: 20px; }
     .signal-card { background: #0f1614; border: 2px solid #2ea043; border-radius: 12px; padding: 20px; }
@@ -29,13 +33,12 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 # ─────────────────────────────────────────────────────────────────────────────
-#  2. BACKEND LOGIC (MT5 & AI - MANTAP)
+#  2. LOGIC
 # ─────────────────────────────────────────────────────────────────────────────
 if "ai_analysis" not in st.session_state: st.session_state["ai_analysis"] = None
 
 def init_mt5(): return mt5.initialize()
 
-# [REUSE FUNGSI ANALISIS & TRADING DARI SEBELUMNYA - LOGIC TETAP SAMA]
 def fetch_and_calculate_indicators(symbol, timeframe_mt5, count=100):
     rates = mt5.copy_rates_from_pos(symbol, timeframe_mt5, 0, count)
     if rates is None: return None
@@ -47,25 +50,26 @@ def fetch_and_calculate_indicators(symbol, timeframe_mt5, count=100):
     return df
 
 # ─────────────────────────────────────────────────────────────────────────────
-#  3. MOBILE-FIRST UI LAYOUT (KONTROL DI ATAS, BUKAN SIDEBAR)
+#  3. UI LAYOUT
 # ─────────────────────────────────────────────────────────────────────────────
-st.markdown("<div class='header-text'>📱 MT5 Dashboard</div>", unsafe_allow_html=True)
+st.markdown("<div class='header-text'>📱 MT5 Simple Dashboard v2.0</div>", unsafe_allow_html=True)
 
 # Main Controls (Integrated)
-with st.expander("⚙️ Konfigurasi Trading (Buka untuk Ubah)", expanded=False):
-    symbol_input = st.text_input("Simbol", value="EURUSD").upper()
+with st.expander("⚙️ Konfigurasi Trading (Buka untuk Ubah)", expanded=True):
+    # Added Selectbox for Pairs
+    pair_options = ["EURUSD", "GBPUSD", "USDJPY", "XAUUSD", "AUDUSD", "NZDUSD", "USDCHF"]
+    symbol_input = st.selectbox("Simbol", pair_options, index=0)
+    
     timeframe_input = st.selectbox("Timeframe", ["M1", "M5", "M15", "H1"], index=2)
     lot_input = st.number_input("Lot Size", value=0.10, step=0.01)
 
-# Status
+# Status & Data MT5
 mt5.initialize()
 account = mt5.account_info()
 if account:
     st.markdown(f"<div style='text-align:center; color:#2ea043; font-weight:bold;'>🟢 {account.name} | Bal: ${account.balance:.2f}</div>", unsafe_allow_html=True)
 
-# AI Signal Card (REPLICA UI REFERENSI)
-st.markdown("### ⚡ AI SIGNAL")
-# --- Logic Mockup Signal (Ganti dengan fungsi API lo nanti) ---
+# Mockup Data Signal
 signal_data = {
     "rec": "BUY",
     "desc": "Tren besar sangat selaras (MTF 15/15) dan harga bertahan di atas EMA200.",
@@ -75,6 +79,8 @@ signal_data = {
     "tp": 1.14460
 }
 
+# Signal Card
+st.markdown("### ⚡ AI SIGNAL")
 st.markdown(f"""
 <div class='signal-card'>
     <div class='signal-header'>{signal_data['rec']}</div>
@@ -84,7 +90,7 @@ st.markdown(f"""
 </div>
 """, unsafe_allow_html=True)
 
-# Level dari Gemini AI
+# Levels
 st.markdown("### ✨ LEVEL DARI GEMINI AI")
 st.markdown(f"""
 <div class='card'>
