@@ -117,6 +117,3 @@ if data is not None:
 
     if st.button("🔄 REFRESH MANUAL", use_container_width=True, type="primary"):
         st.rerun()
-
-
-Coba jalankan ini. Kalau tampilannya masih belum pas, kasih tahu gua bagian mana yang paling meleset dari SS yang lo kirim. Gua bakal betulin sampai bener-bener mirip.
