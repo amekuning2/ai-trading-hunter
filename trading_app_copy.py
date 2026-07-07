@@ -204,28 +204,24 @@ def get_price(symbol, BINANCE_API_KEY, BINANCE_API_SECRET, market_type="Spot"):
         client = get_client(BINANCE_API_KEY, BINANCE_API_SECRET)
         if market_type == "Futures":
             ticker = client.futures_ticker(symbol=symbol)
-            return {
-                "price":       float(ticker["lastPrice"]),
-                "change":      float(ticker["priceChangePercent"]),
-                "high":        float(ticker["highPrice"]),
-                "low":         float(ticker["lowPrice"]),
-                "volume":      float(ticker["volume"]),
-                "quoteVolume": float(ticker["quoteVolume"]),
-            }
         else:
             ticker = client.get_ticker(symbol=symbol)
-            return {
-                "price":       float(ticker["lastPrice"]),
-                "change":      float(ticker["priceChangePercent"]),
-                "high":        float(ticker["highPrice"]),
-                "low":         float(ticker["lowPrice"]),
-                "volume":      float(ticker["volume"]),
-                "quoteVolume": float(ticker["quoteVolume"]),
-            }
+        return {
+            "price":       float(ticker["lastPrice"]),
+            "change":      float(ticker["priceChangePercent"]),
+            "high":        float(ticker["highPrice"]),
+            "low":         float(ticker["lowPrice"]),
+            "volume":      float(ticker["volume"]),
+            "quoteVolume": float(ticker["quoteVolume"]),
+            "error":       None,
+        }
     except Exception as e:
-        st.error(f"BINANCE ERROR: {type(e).__name__}")
-        st.error(str(e))
-        raise
+        err_msg = str(e)
+        if "-1121" in err_msg:
+            return {"error": f"❌ Pair **{symbol}** tidak tersedia di Binance {market_type}. Coba ganti ke Spot atau pilih pair lain."}
+        elif "-1100" in err_msg:
+            return {"error": f"❌ Nama pair **{symbol}** tidak valid. Pastikan format benar (contoh: BTCUSDT)."}
+        return {"error": f"❌ Binance error: {err_msg}"}
 
 @st.cache_data(ttl=60)
 def get_klines(symbol, interval, limit, BINANCE_API_KEY, BINANCE_API_SECRET, market_type="Spot"):
@@ -491,73 +487,94 @@ def calculate_signal(df, mtf_score_override=None):
 # ─────────────────────────────────────────────
 #  TRADE DECISION ENGINE
 # ─────────────────────────────────────────────
-def calculate_trade_decision(signal, score_detail, df, supports, resistances, trading_mode="Ketat"):
+def calculate_trade_decision(signal, score_detail, df, supports, resistances, trading_mode="Intraday"):
+    """
+    3 Mode:
+      Scalping  — agresif, frekuensi tinggi, TP kecil cepat
+      Intraday  — balance, frekuensi sedang, RR wajar (GANTI mode Ketat)
+      Swing     — selektif, RR besar, jarang entry
+    """
     if signal == "HOLD":
         return "SKIP", "Sinyal HOLD — tidak ada setup", "#8b949e"
 
-    is_buy      = signal == "BUY"
-    total       = score_detail.get("confidence", score_detail["total"])
-    trend       = score_detail["trend"] if is_buy else score_detail["trend_max"] - score_detail["trend"]
-    momentum    = score_detail["momentum"] if is_buy else score_detail["momentum_max"] - score_detail["momentum"]
-    structure   = score_detail["structure"] if is_buy else score_detail["structure_max"] - score_detail["structure"]
-    mtf         = score_detail["mtf"] if is_buy else score_detail["mtf_max"] - score_detail["mtf"]
+    is_buy   = signal == "BUY"
+    total    = score_detail.get("confidence", score_detail["total"])
+    trend    = score_detail["trend"]     if is_buy else score_detail["trend_max"]     - score_detail["trend"]
+    momentum = score_detail["momentum"]  if is_buy else score_detail["momentum_max"]  - score_detail["momentum"]
+    structure= score_detail["structure"] if is_buy else score_detail["structure_max"] - score_detail["structure"]
+    mtf      = score_detail["mtf"]       if is_buy else score_detail["mtf_max"]       - score_detail["mtf"]
 
-    is_scalping = trading_mode == "Scalping"
-    sl_mult = 0.8 if is_scalping else 1.5
-    tp_mult = 0.7 if is_scalping else 2.0
+    # ── Config per mode ──────────────────────────────────
+    if trading_mode == "Scalping":
+        sl_mult, tp_mult       = 1.2, 0.8   # SL lebih lebar dari sebelumnya (0.8→1.2) biar ga kena noise
+        min_score, min_rr      = 44, 0.4
+        trend_min, mom_min     = 8, 6
+        mtf_min                = 3
+        enter_score, enter_rr  = 48, 0.45
+        str_ok_pct             = 2.5         # boleh agak jauh dari S/R
+    elif trading_mode == "Intraday":
+        sl_mult, tp_mult       = 1.4, 1.5
+        min_score, min_rr      = 46, 0.6
+        trend_min, mom_min     = 10, 8
+        mtf_min                = 4
+        enter_score, enter_rr  = 50, 0.8
+        str_ok_pct             = 2.0
+    else:  # Swing
+        sl_mult, tp_mult       = 1.8, 2.5
+        min_score, min_rr      = 52, 1.0
+        trend_min, mom_min     = 15, 12
+        mtf_min                = 6
+        enter_score, enter_rr  = 56, 1.2
+        str_ok_pct             = 1.5
 
+    # ── Hitung RR dari ATR ──────────────────────────────
     try:
         atr           = ta.volatility.AverageTrueRange(df["high"], df["low"], df["close"], window=14).average_true_range().iloc[-1]
         current_price = df["close"].iloc[-1]
-        sl_price      = current_price - (atr * sl_mult) if signal == "BUY" else current_price + (atr * sl_mult)
-        tp1_price     = current_price + (atr * tp_mult) if signal == "BUY" else current_price - (atr * tp_mult)
-        sl_dist       = abs(current_price - sl_price)
-        tp_dist       = abs(tp1_price - current_price)
-        rr_ratio      = tp_dist / sl_dist if sl_dist > 0 else 0
+        sl_price  = current_price - (atr * sl_mult) if signal == "BUY" else current_price + (atr * sl_mult)
+        tp1_price = current_price + (atr * tp_mult) if signal == "BUY" else current_price - (atr * tp_mult)
+        rr_ratio  = abs(tp1_price - current_price) / max(abs(current_price - sl_price), 0.0001)
     except Exception:
         rr_ratio = 0
 
-    structure_ok = False
+    # ── Cek struktur S/R ────────────────────────────────
     if signal == "BUY" and supports:
-        structure_ok = abs(current_price - supports[0]) / current_price * 100 <= 1.5
+        structure_ok = abs(current_price - supports[0]) / current_price * 100 <= str_ok_pct
     elif signal == "SELL" and resistances:
-        structure_ok = abs(resistances[0] - current_price) / current_price * 100 <= 1.5
+        structure_ok = abs(resistances[0] - current_price) / current_price * 100 <= str_ok_pct
     else:
-        structure_ok = structure >= 12
+        structure_ok = structure >= 8  # lebih toleran dari sebelumnya (12→8)
 
-    reasons_wait = []
-    min_score    = 52 if is_scalping else 50
-    min_rr       = 0.70 if is_scalping else 1.0
-    trend_min    = 10 if is_scalping else 15
-    momentum_min = 8  if is_scalping else 12
-    mtf_min      = 4  if is_scalping else 6
-
+    # ── Hard floor — skip langsung ──────────────────────
     if total < min_score:
-        return "SKIP", f"Score terlalu rendah ({total}/100) — jangan masuk", "#f85149"
+        return "SKIP", f"Score {total}/100 di bawah minimum {min_score} — skip", "#f85149"
     if rr_ratio < min_rr:
-        return "SKIP", f"RR {rr_ratio:.2f} — reward tidak sepadan risiko", "#f85149"
+        return "SKIP", f"RR {rr_ratio:.2f} terlalu kecil (min {min_rr}) — skip", "#f85149"
+
+    # ── Kumpulkan alasan wait ────────────────────────────
+    reasons_wait = []
     if trend < trend_min:
-        reasons_wait.append("trend lemah")
-    if momentum < momentum_min:
-        reasons_wait.append("momentum belum konfirmasi")
-    if not is_scalping and rr_ratio < 1.5:
-        reasons_wait.append(f"RR {rr_ratio:.2f} masih marginal")
+        reasons_wait.append("trend belum kuat")
+    if momentum < mom_min:
+        reasons_wait.append("momentum lemah")
     if mtf < mtf_min:
         reasons_wait.append("MTF belum searah")
-    if not structure_ok and (not is_scalping or structure < 7):
-        reasons_wait.append("belum di zona S/R ideal")
+    if not structure_ok and structure < 8:
+        reasons_wait.append("jauh dari zona S/R")
 
-    enter_score = 55 if is_scalping else 60
-    enter_rr    = 0.70 if is_scalping else 1.5
+    # ── Final decision ───────────────────────────────────
+    if total >= enter_score and rr_ratio >= enter_rr and len(reasons_wait) == 0:
+        return "ENTER", f"{trading_mode} setup ✅ Score {total}/100, RR 1:{rr_ratio:.2f}", "#3fb950"
 
-    if not reasons_wait and total >= enter_score and rr_ratio >= enter_rr:
-        mode_note = "Scalp aktif" if is_scalping else "Setup solid"
-        return "ENTER", f"{mode_note} — Score {total}/100, RR 1:{rr_ratio:.2f}", "#3fb950"
+    # Partial ok → ENTER kalau hanya 1 minor reason
+    if total >= enter_score and rr_ratio >= enter_rr and len(reasons_wait) <= 1:
+        minor = reasons_wait[0] if reasons_wait else ""
+        return "ENTER", f"Setup cukup ({minor or 'konfirmasi parsial'}) — Score {total}, RR 1:{rr_ratio:.2f}", "#3fb950"
 
     if reasons_wait:
         return "WAIT", f"Tunggu: {', '.join(reasons_wait[:2])}", "#f0883e"
 
-    return "ENTER", f"Setup cukup — Score {total}/100, RR 1:{rr_ratio:.1f}", "#3fb950"
+    return "ENTER", f"Score {total}/100, RR 1:{rr_ratio:.1f}", "#3fb950"
 
 # ─────────────────────────────────────────────
 #  REAL MTF SCORE ENGINE
@@ -566,6 +583,8 @@ def calculate_mtf_score(symbol, current_tf, BINANCE_API_KEY, BINANCE_API_SECRET,
     tf_config = (
         [("5m", "5M", 3), ("15m", "15M", 5), ("1h", "1H", 7)]
         if trading_mode == "Scalping"
+        else [("15m","15M",2), ("1h","1H",5), ("4h","4H",8)]
+        if trading_mode == "Intraday"
         else [("1h", "1H", 3), ("4h", "4H", 5), ("1d", "1D", 7)]
     )
     total_weight = 0
@@ -638,11 +657,16 @@ def generate_trading_plan(df, price_data, signal, supports, resistances, modal_u
     atr = ta.volatility.AverageTrueRange(df["high"], df["low"], df["close"], window=14).average_true_range().iloc[-1]
 
     if trading_mode == "Scalping":
-        sl_mult, tp1_mult, tp2_mult, tp3_mult = 0.8, 0.7, 1.0, 1.4
-        min_tp_pct, tp_step_pct, min_sl_pct   = 0.0005, 0.0005, 0.0015
-    else:
-        sl_mult, tp1_mult, tp2_mult, tp3_mult = 1.5, 2.0, 3.5, 5.0
-        min_tp_pct, tp_step_pct, min_sl_pct   = 0.001, 0.002, 0.005
+        # SL diperlebar (0.8→1.2) agar tidak kena noise, TP tetap pendek
+        sl_mult, tp1_mult, tp2_mult, tp3_mult = 1.2, 0.8, 1.2, 1.6
+        min_tp_pct, tp_step_pct, min_sl_pct   = 0.0003, 0.0003, 0.001
+    elif trading_mode == "Intraday":
+        # Balance — SL sedang, TP wajar
+        sl_mult, tp1_mult, tp2_mult, tp3_mult = 1.4, 1.5, 2.5, 3.5
+        min_tp_pct, tp_step_pct, min_sl_pct   = 0.0008, 0.0015, 0.003
+    else:  # Swing
+        sl_mult, tp1_mult, tp2_mult, tp3_mult = 1.8, 2.5, 4.0, 6.0
+        min_tp_pct, tp_step_pct, min_sl_pct   = 0.002, 0.003, 0.006
 
     if signal == "BUY":
         entry   = round(current_price, 4)
@@ -748,7 +772,9 @@ def generate_ai_reasoning(signal, decision, decision_reason, score_detail, indic
     sr_note = "harga berada di zona Support/Resistance yang ideal" if structure_pct >= 60 else "harga belum berada di zona S/R yang ideal"
     points.append(f"Struktur harga {strength_label(structure_pct)} — {sr_note}.")
     if mtf_pct >= 70:
-        mtf_label = "5M/15M/1H" if trading_mode == "Scalping" else "1H/4H/1D"
+        if trading_mode == "Scalping":  mtf_label = "5M/15M/1H"
+        elif trading_mode == "Intraday": mtf_label = "15M/1H/4H"
+        else:                            mtf_label = "1H/4H/1D"
         points.append(f"Multi-timeframe ({mtf_label}) searah penuh, konfirmasi cukup kuat.")
     elif mtf_pct >= 45:
         points.append("Multi-timeframe sebagian searah, masih ada timeframe yang belum konfirmasi.")
@@ -771,48 +797,109 @@ def generate_ai_reasoning(signal, decision, decision_reason, score_detail, indic
     return points, conclusion, color
 
 # ─────────────────────────────────────────────
-#  GEMINI AI LAYER (Enhancement, bukan pengganti)
+#  GEMINI AI DECISION ENGINE
+#  Enhancement layer: bisa override WAIT→ENTER untuk peluang mikro
+#  Safety rule: tidak bisa override SKIP (score terlalu rendah)
 # ─────────────────────────────────────────────
 @st.cache_data(ttl=120)
-def get_gemini_insights(symbol, interval, trading_mode, signal, decision, score_total,
+def get_gemini_decision(symbol, interval, trading_mode, signal, formula_decision, score_total,
                         rsi, macd_val, ema20, ema50, current_price,
                         supports_str, resistances_str, mtf_context_str, GEMINI_API_KEY,
                         market_type="Spot", leverage=1):
+    """
+    Return dict:
+      insights        : list[str]  — poin analisis
+      kesimpulan      : str        — ringkasan AI
+      ai_decision     : ENTER/WAIT/SKIP — keputusan final AI
+      ai_reason       : str        — alasan AI
+      is_override     : bool       — apakah AI override rumus
+    """
+    fallback = {
+        "insights": [], "kesimpulan": "",
+        "ai_decision": formula_decision, "ai_reason": "",
+        "is_override": False
+    }
     if not GEMINI_API_KEY:
-        return None
+        return fallback
+
     try:
-        futures_note = f"""
-- Market Type: FUTURES (Leverage {leverage}x)
-- Di Futures, sinyal BUY = posisi LONG, sinyal SELL = posisi SHORT (keduanya valid)
-- Hitung potensi profit/loss dengan pengali leverage {leverage}x
-""" if market_type == "Futures" else "- Market Type: SPOT (hanya BUY/HOLD yang valid)"
+        # Aturan override yang boleh dilakukan AI
+        if trading_mode == "Scalping":
+            override_rule = """ATURAN OVERRIDE (Scalping — Agresif, frekuensi tinggi):
+- PRIORITAS: user butuh profit $5/hari dari trade kecil yang sering → jangan terlalu ketat
+- WAIT → boleh override ENTER kalau ada 1+ konfirmasi: momentum kuat ATAU harga di zona S/R ATAU volume surge
+- SKIP (score 44-47) → boleh override ke WAIT kalau ada peluang terlihat
+- SKIP (score <44) → WAJIB tetap SKIP"""
+        elif trading_mode == "Intraday":
+            override_rule = """ATURAN OVERRIDE (Intraday — Balance frekuensi & kualitas):
+- WAIT → boleh override ENTER kalau ada 2+ konfirmasi: trend searah + momentum ok + tidak jauh dari S/R
+- SKIP (score 46-49) → boleh override ke WAIT kalau setup terlihat membaik
+- SKIP (score <46) → WAJIB tetap SKIP
+- Jangan override ke ENTER langsung dari SKIP"""
+        else:
+            override_rule = """ATURAN OVERRIDE (Swing — Selektif, RR besar):
+- WAIT → boleh override ENTER hanya kalau SEMUA konfirmasi terpenuhi: trend kuat + MTF searah + di zona S/R + RR > 1.2
+- SKIP → jangan override, tunggu setup sempurna
+- Mode ini memang jarang entry, itu normal"""
+
+        futures_ctx = f"Market: FUTURES {leverage}x — SHORT (SELL) valid selain LONG (BUY)" if market_type == "Futures" else "Market: SPOT — hanya BUY/HOLD valid"
 
         prompt = f"""
-Kamu adalah analis trading profesional yang membantu trader retail Indonesia.
-Berikan 3 poin insight singkat dan 1 kesimpulan dalam Bahasa Indonesia yang santai tapi informatif.
+Kamu adalah Decision Engine AI untuk sistem trading hybrid.
+Rumus matematika sudah menghasilkan data presisi, tugasmu adalah memberikan interpretasi kontekstual dan memutuskan apakah keputusan rumus perlu di-override untuk menangkap peluang mikro.
 
-Data market:
-- Symbol: {symbol}, Timeframe: {interval}, Mode: {trading_mode}
-- Signal Engine: {signal}, Decision: {decision}, Score: {score_total}/100
-- RSI: {rsi}, MACD: {macd_val}, EMA20: {ema20}, EMA50: {ema50}
-- Harga saat ini: {current_price}
-- Support levels: {supports_str}
-- Resistance levels: {resistances_str}
-- MTF bias: {mtf_context_str}
-{futures_note}
+DATA TEKNIKAL DARI RUMUS:
+- Symbol: {symbol} | TF: {interval} | Mode: {trading_mode}
+- Signal Rumus: {signal} | Keputusan Rumus: {formula_decision} | Score: {score_total}/100
+- RSI: {rsi} | MACD: {macd_val} | EMA20: {ema20} | EMA50: {ema50}
+- Harga: {current_price} | Support: {supports_str} | Resistance: {resistances_str}
+- MTF: {mtf_context_str} | {futures_ctx}
 
-Fokus pada: apakah setup ini worth it untuk diambil trader dengan modal kecil?
-Target: konsisten profit kecil, bukan FOMO besar.
+TARGET USER: Profit konsisten minimal $5/hari dengan modal kecil.
+Mode aktif: {trading_mode}
+- Scalping: cari peluang mikro yang sering, TP kecil tapi konsisten, entry lebih longgar
+- Intraday: balance antara kualitas dan frekuensi, jangan terlalu kaku
+- Swing: selektif, boleh lewatkan kalau tidak yakin
+Prinsip: lebih baik masuk dengan setup 70% bagus dan kena TP kecil, daripada nunggu setup 100% sempurna yang tidak pernah datang.
 
-Balas HANYA dalam format JSON:
-{{"insights": ["poin1", "poin2", "poin3"], "kesimpulan": "teks kesimpulan singkat"}}
+{override_rule}
+
+Balas HANYA format JSON murni tanpa teks lain:
+{{
+  "ai_decision": "ENTER" atau "WAIT" atau "SKIP",
+  "ai_reason": "alasan singkat keputusan AI (1 kalimat)",
+  "is_override": true atau false,
+  "insights": ["poin analisis 1", "poin analisis 2", "poin analisis 3"],
+  "kesimpulan": "ringkasan akhir singkat"
+}}
 """
         model    = genai.GenerativeModel("gemini-3.1-flash-lite")
         response = model.generate_content(prompt, generation_config={"response_mime_type": "application/json"})
         data     = json.loads(response.text.strip())
-        return data
+
+        # Safety floor per mode
+        floor_map = {"Scalping": 44, "Intraday": 46, "Swing": 52}
+        min_skip_override = floor_map.get(trading_mode, 46)
+        if formula_decision == "SKIP" and score_total < min_skip_override:
+            data["ai_decision"] = "SKIP"
+            data["is_override"] = False
+            data["ai_reason"]   = f"Score {score_total} di bawah floor {min_skip_override} — tetap SKIP."
+
+        # Kalau signal HOLD, AI tidak bisa paksa ENTER
+        if signal == "HOLD":
+            data["ai_decision"] = "SKIP"
+            data["is_override"] = False
+
+        return {
+            "insights":    data.get("insights", []),
+            "kesimpulan":  data.get("kesimpulan", ""),
+            "ai_decision": data.get("ai_decision", formula_decision),
+            "ai_reason":   data.get("ai_reason", ""),
+            "is_override": data.get("is_override", False),
+        }
     except Exception as e:
-        return {"insights": [f"Gemini tidak tersedia: {str(e)}"], "kesimpulan": ""}
+        fallback["insights"] = [f"Gemini tidak tersedia: {str(e)}"]
+        return fallback
 
 # ─────────────────────────────────────────────
 #  CHART GENERATOR
@@ -892,26 +979,42 @@ if "sim_history"    not in st.session_state: st.session_state["sim_history"]    
 # ─────────────────────────────────────────────
 #  MAIN CONTENT
 # ─────────────────────────────────────────────
-DEFAULT_PAIRS = ["BTCUSDT", "ETHUSDT", "BNBUSDT", "SOLUSDT", "XRPUSDT", "DOGEUSDT"]
+SPOT_PAIRS    = ["BTCUSDT", "ETHUSDT", "BNBUSDT", "SOLUSDT", "XRPUSDT", "DOGEUSDT"]
+FUTURES_PAIRS = ["BTCUSDT", "ETHUSDT", "BNBUSDT", "SOLUSDT", "XRPUSDT", "DOGEUSDT",
+                 "ADAUSDT", "LINKUSDT", "DOTUSDT", "AVAXUSDT", "MATICUSDT", "LTCUSDT",
+                 "ATOMUSDT", "NEARUSDT", "APTUSDT", "ARBUSDT", "OPUSDT", "SUIUSDT"]
+
+# Market type belum terdefinisi di sini, baca dari session state
+_cur_market = st.session_state.get("market_type", "Spot")
+DEFAULT_PAIRS = FUTURES_PAIRS if _cur_market == "Futures" else SPOT_PAIRS
+
 col_sel1, col_sel2 = st.columns([2, 1])
 with col_sel1:
-    symbol = st.selectbox("🪙 Select Pair", DEFAULT_PAIRS,
-                          index=DEFAULT_PAIRS.index(st.session_state["symbol"]) if st.session_state["symbol"] in DEFAULT_PAIRS else 0)
+    _safe_idx = DEFAULT_PAIRS.index(st.session_state["symbol"]) if st.session_state["symbol"] in DEFAULT_PAIRS else 0
+    symbol = st.selectbox("🪙 Select Pair", DEFAULT_PAIRS, index=_safe_idx)
 with col_sel2:
-    custom = st.text_input("Custom pair", placeholder="e.g. ADAUSDT")
-    if custom:
-        symbol = custom.upper()
+    import re
+    custom_raw = st.text_input("Custom pair", placeholder="e.g. ADAUSDT")
+    if custom_raw:
+        custom_clean = re.sub(r"[^A-Za-z0-9]", "", custom_raw).upper().strip()
+        if len(custom_clean) >= 4:
+            symbol = custom_clean
+        else:
+            st.caption("⚠️ Min 4 karakter alfanumerik")
+    if _cur_market == "Futures":
+        st.caption("💡 Futures: tidak semua pair Spot tersedia")
 st.session_state["symbol"] = symbol
 
 tab1, tab2, tab3, tab4, tab5 = st.tabs(["📊 Dashboard", "🕐 Multi-Timeframe", "🔥 Top Gainers", "🧪 Backtesting", "⚙️ Settings"])
 
 # ─── TAB 1: DASHBOARD ───
 with tab1:
-    trading_mode = st.selectbox(
-        "🎯 Trading Mode",
-        ["Scalping", "Ketat"],
-        format_func=lambda mode: "⚡ Scalping — entry & TP cepat" if mode == "Scalping" else "🛡️ Ketat — seleksi maksimum",
-    )
+    def _mode_label(m):
+        if m == "Scalping":  return "⚡ Scalping — 1m-15m, TP cepat, agresif"
+        if m == "Intraday":  return "🎯 Intraday — 15m-1h, balance antara frekuensi & kualitas"
+        return "🛡️ Swing — 4h-1d, selektif, RR besar"
+
+    trading_mode = st.selectbox("🎯 Trading Mode", ["Scalping", "Intraday", "Swing"], format_func=_mode_label)
 
     col_mode, col_lev = st.columns([1, 1])
     with col_mode:
@@ -936,14 +1039,22 @@ with tab1:
         interval = st.selectbox("⏱ Timeframe", [
             ("1 Minute","1m"),("5 Minutes","5m"),("15 Minutes","15m"),
             ("1 Hour","1h"),("4 Hours","4h"),("1 Day","1d")
-        ], format_func=lambda x: x[0], index=2 if trading_mode == "Scalping" else 3)
+        ], format_func=lambda x: x[0],
+           index=1 if trading_mode == "Scalping" else 2 if trading_mode == "Intraday" else 4)
         interval_val = interval[1]
     with col_candle:
         candles = st.slider("Candles", 50, 500, 200)
 
     price_data = get_price(symbol, BINANCE_API_KEY, BINANCE_API_SECRET, market_type=market_type)
-    if price_data is None:
-        st.error(f"Gagal ambil data {symbol}. Cek API key atau nama pair.")
+    if price_data is None or price_data.get("error"):
+        err = price_data.get("error") if price_data else f"Gagal ambil data {symbol}."
+        st.markdown(f"""
+        <div style="background:#2d1b1b; border:1px solid #f85149; border-radius:8px; padding:20px; margin:16px 0;">
+            <p style="color:#f85149; font-size:16px; font-weight:700; margin:0 0 8px 0;">⚠️ Pair Tidak Tersedia</p>
+            <p style="color:#e6edf3; font-size:14px; margin:0;">{err}</p>
+            {"<p style=\'color:#8b949e; font-size:12px; margin:8px 0 0 0;\'>💡 <strong>Tip Futures:</strong> Tidak semua pair Spot tersedia di Futures. Pair populer yang ada di Futures: BTCUSDT, ETHUSDT, BNBUSDT, SOLUSDT, XRPUSDT, DOGEUSDT, ADAUSDT, LINKUSDT, DOTUSDT.</p>" if market_type == "Futures" else ""}
+        </div>
+        """, unsafe_allow_html=True)
         st.stop()
 
     price        = price_data["price"]
@@ -1004,13 +1115,53 @@ with tab1:
         st.markdown('<p class="section-header">AI Signal</p>', unsafe_allow_html=True)
 
         if df is not None:
-            tf_label_map    = {"1m":"1M","5m":"5M","15m":"15M","1h":"1H","4h":"4H","1d":"1D"}
+            tf_label_map     = {"1m":"1M","5m":"5M","15m":"15M","1h":"1H","4h":"4H","1d":"1D"}
             current_tf_label = tf_label_map.get(interval_val, "1H")
-            mtf_real        = calculate_mtf_score(symbol, current_tf_label, BINANCE_API_KEY, BINANCE_API_SECRET, trading_mode)
+            mtf_real         = calculate_mtf_score(symbol, current_tf_label, BINANCE_API_KEY, BINANCE_API_SECRET, trading_mode)
             signal, reason, signals, indicators, confidence, score_detail = calculate_signal(df, mtf_score_override=mtf_real)
-            decision, decision_reason, decision_color = calculate_trade_decision(
+            formula_decision, formula_reason, formula_color = calculate_trade_decision(
                 signal, score_detail, df, supports, resistances, trading_mode
             )
+
+            # ── GEMINI DECISION ENGINE (override layer) ──
+            gemini_result = None
+            if GEMINI_ENABLED:
+                gemini_result = get_gemini_decision(
+                    symbol=symbol,
+                    interval=interval_val,
+                    trading_mode=trading_mode,
+                    signal=signal,
+                    formula_decision=formula_decision,
+                    score_total=score_detail["total"],
+                    rsi=indicators.get("RSI", 0),
+                    macd_val=indicators.get("MACD", 0),
+                    ema20=indicators.get("EMA20", 0),
+                    ema50=indicators.get("EMA50", 0),
+                    current_price=price,
+                    supports_str=str(supports),
+                    resistances_str=str(resistances),
+                    mtf_context_str=f"MTF Score {mtf_real}/15",
+                    GEMINI_API_KEY=GEMINI_API_KEY,
+                    market_type=market_type,
+                    leverage=leverage,
+                )
+
+            # Final decision: AI override kalau ada, fallback ke formula
+            if gemini_result and gemini_result["ai_decision"]:
+                decision        = gemini_result["ai_decision"]
+                is_override     = gemini_result["is_override"]
+                override_reason = gemini_result["ai_reason"]
+                if is_override:
+                    decision_reason = f"🤖 AI Override: {override_reason}"
+                    decision_color  = "#d2a8ff"  # ungu = AI override
+                else:
+                    decision_reason = formula_reason if not override_reason else override_reason
+                    decision_color  = formula_color
+            else:
+                decision        = formula_decision
+                decision_reason = formula_reason
+                decision_color  = formula_color
+                is_override     = False
 
             signal_class   = f"signal-{signal.lower()}"
             signal_emoji   = "🟢" if signal == "BUY" else "🔴" if signal == "SELL" else "🔵"
@@ -1018,6 +1169,7 @@ with tab1:
             decision_emoji = "🟢" if decision == "ENTER" else "🟡" if decision == "WAIT" else "🔴"
             decision_bg    = "rgba(63,185,80,0.12)"  if decision == "ENTER" else \
                              "rgba(240,136,62,0.12)" if decision == "WAIT"  else "rgba(248,81,73,0.08)"
+            override_badge = f'<span style="font-size:10px; background:#2d1f3d; color:#d2a8ff; border:1px solid #6e40c9; border-radius:4px; padding:2px 6px; margin-left:6px;">✨ AI Override</span>' if is_override else ""
 
             st.markdown(f"""
             <div class="{signal_class}">
@@ -1026,11 +1178,11 @@ with tab1:
                 <div class="strength-bar-container">
                     <div class="strength-bar-fill" style="width:{confidence}%; background:{strength_color};"></div>
                 </div>
-                <p style="color:#8b949e; font-size:11px;">Confidence: {confidence}%</p>
+                <p style="color:#8b949e; font-size:11px;">Formula Score: {score_detail["total"]}/100 | Confidence: {confidence}%</p>
                 <div style="margin-top:14px; background:{decision_bg}; border:1px solid {decision_color};
                      border-radius:6px; padding:10px 12px; text-align:center;">
                     <p style="font-size:18px; font-weight:900; color:{decision_color}; margin:0; letter-spacing:3px;">
-                        {decision_emoji} {decision}
+                        {decision_emoji} {decision}{override_badge}
                     </p>
                     <p style="color:#8b949e; font-size:11px; margin:4px 0 0 0;">{decision_reason}</p>
                 </div>
@@ -1110,8 +1262,12 @@ with tab1:
             plan = generate_trading_plan(df, price_data, signal, supports, resistances, modal_usdt=modal, trading_mode=trading_mode)
 
             if plan:
-                rr_target   = 0.7 if trading_mode == "Scalping" else 1.5
-                rr_marginal = 0.6 if trading_mode == "Scalping" else 1.0
+                if trading_mode == "Scalping":
+                    rr_target, rr_marginal = 0.45, 0.35
+                elif trading_mode == "Intraday":
+                    rr_target, rr_marginal = 0.8, 0.6
+                else:
+                    rr_target, rr_marginal = 1.2, 0.9
                 rr_color    = "#3fb950" if plan["rr_ratio"] >= rr_target else "#f0883e" if plan["rr_ratio"] >= rr_marginal else "#f85149"
 
                 # Label aksi: Futures pakai LONG/SHORT, Spot pakai BUY/SELL
@@ -1237,39 +1393,46 @@ with tab1:
             </div>
             """, unsafe_allow_html=True)
 
-            # ── Gemini AI Insights (enhancement layer) ──
-            if GEMINI_ENABLED and df is not None:
+            # ── Gemini AI Decision Display ──
+            if GEMINI_ENABLED and gemini_result:
                 st.markdown("---")
-                st.markdown('<p class="section-header">✨ Gemini AI Insights</p>', unsafe_allow_html=True)
-                gemini_data = get_gemini_insights(
-                        symbol=symbol,
-                        interval=interval_val,
-                        trading_mode=trading_mode,
-                        signal=signal,
-                        decision=decision,
-                        score_total=score_detail["total"],
-                        rsi=indicators.get("RSI", 0),
-                        macd_val=indicators.get("MACD", 0),
-                        ema20=indicators.get("EMA20", 0),
-                        ema50=indicators.get("EMA50", 0),
-                        current_price=price,
-                        supports_str=str(supports),
-                        resistances_str=str(resistances),
-                        mtf_context_str=f"MTF Score {mtf_real}/15",
-                        GEMINI_API_KEY=GEMINI_API_KEY,
-                        market_type=market_type,
-                        leverage=leverage
-                    )
-                if gemini_data:
-                    insights_html = "".join([
-                        f'<li style="color:#c9d1d9; font-size:13px; margin-bottom:6px; line-height:1.6;">{p}</li>'
-                        for p in gemini_data.get("insights", [])
-                    ])
-                    kesimpulan = gemini_data.get("kesimpulan", "")
+                override_header = "✨ Gemini AI — Decision Override Active" if is_override else "✨ Gemini AI Insights"
+                st.markdown(f'<p class="section-header">{override_header}</p>', unsafe_allow_html=True)
+
+                # Tampilkan formula vs AI decision kalau ada override
+                if is_override:
+                    f_emoji = "🟢" if formula_decision == "ENTER" else "🟡" if formula_decision == "WAIT" else "🔴"
+                    a_emoji = "🟢" if decision == "ENTER" else "🟡" if decision == "WAIT" else "🔴"
                     st.markdown(f"""
-                    <div class="gemini-card">
+                    <div style="background:#1a0f2e; border:1px solid #6e40c9; border-radius:8px; padding:12px; margin-bottom:10px;">
+                        <p style="color:#d2a8ff; font-size:12px; font-weight:700; margin:0 0 8px 0;">⚡ OVERRIDE AKTIF</p>
+                        <div style="display:flex; gap:16px; font-size:13px;">
+                            <div style="flex:1; text-align:center; opacity:0.6;">
+                                <p style="color:#8b949e; margin:0; font-size:10px;">FORMULA ASLI</p>
+                                <p style="color:#8b949e; font-size:16px; font-weight:700; margin:4px 0;">{f_emoji} {formula_decision}</p>
+                                <p style="color:#8b949e; font-size:10px; margin:0;">{formula_reason[:40]}...</p>
+                            </div>
+                            <div style="color:#6e40c9; font-size:20px; display:flex; align-items:center;">→</div>
+                            <div style="flex:1; text-align:center;">
+                                <p style="color:#d2a8ff; margin:0; font-size:10px;">AI DECISION</p>
+                                <p style="color:#d2a8ff; font-size:16px; font-weight:700; margin:4px 0;">{a_emoji} {decision}</p>
+                                <p style="color:#d2a8ff; font-size:10px; margin:0;">{gemini_result["ai_reason"][:40]}...</p>
+                            </div>
+                        </div>
+                    </div>
+                    """, unsafe_allow_html=True)
+
+                insights_html = "".join([
+                    f'<li style="color:#c9d1d9; font-size:13px; margin-bottom:6px; line-height:1.6;">{p}</li>'
+                    for p in gemini_result.get("insights", [])
+                ])
+                kesimpulan = gemini_result.get("kesimpulan", "")
+                if insights_html:
+                    border_color = "#6e40c9" if is_override else "#0f3460"
+                    st.markdown(f"""
+                    <div class="gemini-card" style="border-left-color:{"#d2a8ff" if is_override else "#d2a8ff"};">
                         <ul style="margin:0 0 12px 0; padding-left:18px;">{insights_html}</ul>
-                        {"<p style='color:#d2a8ff; font-size:14px; font-weight:700; margin:0; padding-top:10px; border-top:1px solid #0f3460;'>" + kesimpulan + "</p>" if kesimpulan else ""}
+                        {"<p style='color:#d2a8ff; font-size:14px; font-weight:700; margin:0; padding-top:10px; border-top:1px solid " + border_color + ";'>" + kesimpulan + "</p>" if kesimpulan else ""}
                     </div>
                     """, unsafe_allow_html=True)
 
@@ -1566,7 +1729,7 @@ with tab5:
     st.markdown(f"""
     <div style="background:#161b22; border:1px solid #30363d; border-radius:8px; padding:16px;">
         <p style="color:#8b949e; font-size:12px; margin:0;">
-        Version: <span style="color:#e6edf3;">v3.5 (Fase 3 — Spot + Futures Dual Market)</span><br>
+        Version: <span style="color:#e6edf3;">v3.7 (Fase 3 — Spot + Futures Dual Market)</span><br>
         Exchange: <span style="color:#e6edf3;">Binance Spot & Futures (USDS-M)</span><br>
         Features: <span style="color:#e6edf3;">Dual Mode · Futures LONG/SHORT · Leverage Calc · Real MTF · S&R · Stochastic · EMA200 · Trading Plan · Backtest · Top Gainers</span><br>
         Gemini AI: <span style="color:#e6edf3;">{gemini_status}</span><br>

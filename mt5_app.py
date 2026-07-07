@@ -218,7 +218,11 @@ WAJIB BALAS HANYA FORMAT JSON INI:
 }}
 """
     try:
+<<<<<<< HEAD
         model = genai.GenerativeModel("gemini-3.5-flash")
+=======
+        model = genai.GenerativeModel("gemini-3.1-flash-lite")
+>>>>>>> 51eca67412c88882b1a3c76dc4d67e2a5a34d0d2
         response = model.generate_content(
             prompt,
             generation_config={"response_mime_type": "application/json"}
