@@ -10,7 +10,7 @@ import json
 #  CONFIG
 # ─────────────────────────────────────────────
 st.set_page_config(
-    page_title="MT5 Lite v3.5",
+    page_title="MT5 Lite v4.0",
     page_icon="⚡",
     layout="centered",
     initial_sidebar_state="collapsed"
@@ -125,7 +125,13 @@ GEMINI_MODEL = "gemini-3.1-flash-lite"
 # ─────────────────────────────────────────────
 @st.cache_resource
 def init_mt5():
-    return mt5.initialize()
+    # Coba initialize beberapa kali kalau gagal pertama
+    for attempt in range(3):
+        if mt5.initialize():
+            return True
+        mt5.shutdown()
+        import time; time.sleep(1)
+    return False
 
 TIMEFRAME_MAP = {
     "1m":  mt5.TIMEFRAME_M1,
@@ -375,7 +381,7 @@ for k, v in {
 # ─────────────────────────────────────────────
 #  HEADER
 # ─────────────────────────────────────────────
-st.markdown("## 📊 MT5 Lite v3.5")
+st.markdown("## 📊 MT5 Lite v4.0")
 
 # ─────────────────────────────────────────────
 #  CONTROLS
