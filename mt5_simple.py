@@ -10,7 +10,7 @@ import json
 #  CONFIG
 # ─────────────────────────────────────────────
 st.set_page_config(
-    page_title="MT5 Lite v3.0",
+    page_title="MT5 Lite",
     page_icon="⚡",
     layout="centered",
     initial_sidebar_state="collapsed"
@@ -375,7 +375,7 @@ for k, v in {
 # ─────────────────────────────────────────────
 #  HEADER
 # ─────────────────────────────────────────────
-st.markdown("## 📊 MT5 Lite v3.0")
+st.markdown("## 📊 MT5 Lite")
 
 # ─────────────────────────────────────────────
 #  CONTROLS
@@ -447,8 +447,24 @@ else:
     fmt = ".5f"
 
 # ─────────────────────────────────────────────
-#  TOMBOL REFRESH — satu-satunya trigger analisis
+#  TOGGLE GEMINI + TOMBOL REFRESH
 # ─────────────────────────────────────────────
+col_tog1, col_tog2 = st.columns([1, 2])
+with col_tog1:
+    use_gemini = st.checkbox(
+        "✨ Pakai Gemini AI",
+        value=GEMINI_ENABLED,
+        disabled=not GEMINI_ENABLED,
+        help="Uncheck untuk pakai Formula Engine saja (hemat RPD)"
+    )
+    if not GEMINI_ENABLED:
+        st.caption("🔴 Gemini key tidak aktif")
+with col_tog2:
+    if use_gemini and GEMINI_ENABLED:
+        st.caption(f"🟢 Gemini aktif — 1 klik = 1 RPD")
+    else:
+        st.caption("📐 Formula Engine aktif — 0 RPD")
+
 do_refresh = st.button("🔄 Refresh Analisis", use_container_width=True)
 
 # ─────────────────────────────────────────────
@@ -458,16 +474,16 @@ if do_refresh and bid > 0:
     df = get_klines(symbol, interval_val, 200)
     res, sup = get_sr(df) if df is not None else ([], [])
 
-    if GEMINI_ENABLED:
+    if use_gemini and GEMINI_ENABLED:
         with st.status("🤖 Gemini menganalisis...", expanded=False):
             result = call_gemini(symbol, interval_val, trading_mode,
                                   df, bid, ask, spread, digits, res, sup)
         if result is None:
-            # Gemini error/limit → fallback formula
-            st.warning("⚠️ Gemini tidak merespons — menggunakan Formula Engine sebagai fallback.")
+            # Gemini error/limit → fallback formula otomatis
+            st.warning("⚠️ Gemini tidak merespons / limit — Formula Engine aktif sebagai fallback.")
             result = formula_signal(df, symbol, bid, digits)
     else:
-        # Gemini tidak aktif → langsung formula
+        # Gemini di-toggle off atau tidak aktif → langsung formula
         result = formula_signal(df, symbol, bid, digits)
 
     if result:
@@ -601,7 +617,12 @@ if result:
 
 else:
     # Empty state
-    gem_hint = "Gemini AI aktif" if GEMINI_ENABLED else "Formula Engine aktif (Gemini tidak aktif)"
+    if use_gemini and GEMINI_ENABLED:
+        gem_hint = f"Gemini AI aktif ({GEMINI_MODEL})"
+    elif GEMINI_ENABLED:
+        gem_hint = "Formula Engine aktif (Gemini di-toggle off)"
+    else:
+        gem_hint = "Formula Engine aktif (Gemini key tidak ada)"
     st.markdown(f"""
     <div class="empty-state">
         <div style="font-size:48px;">🤖</div>
