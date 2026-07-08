@@ -96,6 +96,61 @@ GEMINI_ENABLED = bool(GEMINI_API_KEY)
 if GEMINI_ENABLED:
     genai.configure(api_key=GEMINI_API_KEY)
 
+# ─────────────────────────────────────────────
+#  FORMULA FALLBACK ENGINE
+#  Aktif kalau Gemini limit/di-toggle off
+#  XAUUSD: TP +1.5/+2.5, SL -16 (terbukti dari demo trading)
+# ─────────────────────────────────────────────
+def formula_signal_engine(df, symbol, bid, digits):
+    if df is None or len(df) < 50:
+        return None
+    close = df["close"]
+    rsi   = ta.momentum.RSIIndicator(close, window=14).rsi().iloc[-1]
+    macd_i= ta.trend.MACD(close)
+    mv    = macd_i.macd().iloc[-1]
+    ms    = macd_i.macd_signal().iloc[-1]
+    ema20 = ta.trend.EMAIndicator(close, window=20).ema_indicator().iloc[-1]
+    ema50 = ta.trend.EMAIndicator(close, window=50).ema_indicator().iloc[-1]
+    atr   = ta.volatility.AverageTrueRange(df["high"], df["low"], close, window=14).average_true_range().iloc[-1]
+    is_xau = "XAU" in symbol or "GOL" in symbol
+    is_jpy = "JPY" in symbol
+    bull = sum([bid > ema20, bid > ema50, mv > ms, rsi < 60])
+    bear = sum([bid < ema20, bid < ema50, mv < ms, rsi > 40])
+    if bull >= 3:
+        action = "BUY"
+        entry  = round(bid, digits)
+        if is_xau:
+            tp1,tp2,sl = round(entry+1.5,digits),round(entry+2.5,digits),round(entry-16.0,digits)
+        elif is_jpy:
+            tp1,tp2,sl = round(entry+(atr*0.8),digits),round(entry+(atr*1.3),digits),round(entry-(atr*1.5),digits)
+        else:
+            tp1,tp2,sl = round(entry+(atr*0.8),digits),round(entry+(atr*1.3),digits),round(entry-(atr*1.5),digits)
+    elif bear >= 3:
+        action = "SELL"
+        entry  = round(bid, digits)
+        if is_xau:
+            tp1,tp2,sl = round(entry-1.5,digits),round(entry-2.5,digits),round(entry+16.0,digits)
+        elif is_jpy:
+            tp1,tp2,sl = round(entry-(atr*0.8),digits),round(entry-(atr*1.3),digits),round(entry+(atr*1.5),digits)
+        else:
+            tp1,tp2,sl = round(entry-(atr*0.8),digits),round(entry-(atr*1.3),digits),round(entry+(atr*1.5),digits)
+    else:
+        return {"action":"HOLD","entry":bid,"tp1":0,"tp2":0,"sl":0,
+                "confidence":40,"reason":"Market sideways — tidak ada setup jelas.",
+                "insights":[],"ai_active":True,"source":"formula","market_reco":""}
+    rsi_note = f"RSI {rsi:.0f} {'oversold' if rsi<35 else 'overbought' if rsi>65 else 'neutral'}"
+    return {
+        "action":action,"entry":entry,"tp1":tp1,"tp2":tp2,"sl":sl,
+        "confidence":min(int((max(bull,bear)/4)*80+20),85),
+        "reason":f"{'Bullish' if action=='BUY' else 'Bearish'} — EMA+MACD+{rsi_note} konfirmasi.",
+        "insights":[
+            f"EMA20={ema20:.{digits}f} EMA50={ema50:.{digits}f} — price {'above' if bid>ema50 else 'below'} EMA50",
+            f"MACD {'bullish' if mv>ms else 'bearish'} cross, RSI={rsi:.1f}, ATR={atr:.{digits}f}",
+            f"Level {'XAUUSD scalping (TP kecil realistis)' if is_xau else 'ATR-based forex'}",
+        ],
+        "ai_active":True,"source":"formula","market_reco":"",
+    }
+
 @st.cache_data(ttl=60)
 def get_gemini_full_analysis(symbol, interval, trading_mode,
                               ohlcv_summary, rsi, macd_val, macd_sig,
@@ -218,11 +273,7 @@ WAJIB BALAS HANYA FORMAT JSON INI:
 }}
 """
     try:
-<<<<<<< HEAD
-        model = genai.GenerativeModel("gemini-3.5-flash")
-=======
         model = genai.GenerativeModel("gemini-3.1-flash-lite")
->>>>>>> 51eca67412c88882b1a3c76dc4d67e2a5a34d0d2
         response = model.generate_content(
             prompt,
             generation_config={"response_mime_type": "application/json"}
@@ -1006,8 +1057,12 @@ def build_chart(df, symbol, resistances=[], supports=[]):
 # ─────────────────────────────────────────────
 #  SESSION STATE
 # ─────────────────────────────────────────────
-if "auto_refresh_mt5" not in st.session_state:
-    st.session_state["auto_refresh_mt5"] = False
+if "auto_refresh_mt5"   not in st.session_state:
+    st.session_state["auto_refresh_mt5"]   = False
+if "use_gemini_mt5"     not in st.session_state:
+    st.session_state["use_gemini_mt5"]     = True
+if "gemini_result_mt5"  not in st.session_state:
+    st.session_state["gemini_result_mt5"]  = None
 
 # ─────────────────────────────────────────────
 #  MT5 INIT CHECK
@@ -1096,6 +1151,26 @@ with tab1:
 
     st.markdown("---")
 
+    # ── Toggle Gemini + Manual Refresh ──
+    col_tog, col_btn = st.columns([1, 2])
+    with col_tog:
+        use_gemini = st.checkbox(
+            "✨ Pakai Gemini AI",
+            value=st.session_state["use_gemini_mt5"] and GEMINI_ENABLED,
+            disabled=not GEMINI_ENABLED,
+            key="gemini_toggle_mt5",
+            help="Uncheck = pakai Formula Engine, hemat RPD Gemini"
+        )
+        st.session_state["use_gemini_mt5"] = use_gemini
+        if not GEMINI_ENABLED:
+            st.caption("🔴 Gemini key tidak ada")
+        elif use_gemini:
+            st.caption("🟢 Gemini aktif")
+        else:
+            st.caption("📐 Formula aktif")
+    with col_btn:
+        do_refresh = st.button("🔄 Refresh Analisis", use_container_width=True, key="refresh_btn_mt5")
+
     col_chart, col_signal = st.columns([3, 1])
 
     with col_chart:
@@ -1143,23 +1218,44 @@ with tab1:
                 for i, row in enumerate(df.tail(5).itertuples())
             ])
 
-            # ── GEMINI SEBAGAI OTAK UTAMA ──
+            # ── GEMINI / FORMULA ENGINE — tergantung toggle + do_refresh ──
             gemini_data = None
-            if GEMINI_ENABLED:
-                gemini_data = get_gemini_full_analysis(
-                    symbol=symbol, interval=interval_val, trading_mode=trading_mode,
-                    ohlcv_summary=_ohlcv,
-                    rsi=_rsi, macd_val=_macd, macd_sig=_macd_s,
-                    ema20=_ema20, ema50=_ema50, ema200=_ema200,
-                    bb_pos=_bb_pos, vol_ratio=_vol_r, atr=_atr,
-                    current_price=bid, bid=bid, ask=ask, spread=_spread,
-                    supports_str=str(supports), resistances_str=str(resistances),
-                    mtf_score=mtf_real,
-                    formula_signal=signal, formula_score=score_detail["total"],
-                    GEMINI_API_KEY=GEMINI_API_KEY,
-                )
 
-            # Tentukan tampilan berdasarkan hasil Gemini
+            # Jalankan analisis: kalau refresh diklik ATAU belum ada hasil sebelumnya
+            _run_analysis = do_refresh or st.session_state["gemini_result_mt5"] is None
+
+            if _run_analysis:
+                if use_gemini and GEMINI_ENABLED:
+                    # Panggil Gemini
+                    gemini_data = get_gemini_full_analysis(
+                        symbol=symbol, interval=interval_val, trading_mode=trading_mode,
+                        ohlcv_summary=_ohlcv,
+                        rsi=_rsi, macd_val=_macd, macd_sig=_macd_s,
+                        ema20=_ema20, ema50=_ema50, ema200=_ema200,
+                        bb_pos=_bb_pos, vol_ratio=_vol_r, atr=_atr,
+                        current_price=bid, bid=bid, ask=ask, spread=_spread,
+                        supports_str=str(supports), resistances_str=str(resistances),
+                        mtf_score=mtf_real,
+                        formula_signal=signal, formula_score=score_detail["total"],
+                        GEMINI_API_KEY=GEMINI_API_KEY,
+                    )
+                    if gemini_data is None or not gemini_data.get("ai_active"):
+                        # Gemini error/limit → fallback formula
+                        st.warning("⚠️ Gemini tidak merespons / kena limit — Formula Engine aktif.")
+                        gemini_data = formula_signal_engine(df, symbol, bid, digits)
+                else:
+                    # Toggle off / Gemini tidak aktif → langsung formula
+                    gemini_data = formula_signal_engine(df, symbol, bid, digits)
+
+                # Simpan hasil ke session state
+                if gemini_data:
+                    gemini_data["_ts"] = __import__("datetime").datetime.now().strftime("%H:%M:%S")
+                    st.session_state["gemini_result_mt5"] = gemini_data
+            else:
+                # Pakai hasil sebelumnya (tidak perlu Gemini lagi)
+                gemini_data = st.session_state["gemini_result_mt5"]
+
+            # Tentukan tampilan berdasarkan hasil
             if gemini_data and gemini_data.get("ai_active"):
                 ai_action    = gemini_data["action"]
                 ai_conf      = gemini_data["confidence"]
@@ -1238,10 +1334,23 @@ with tab1:
                     <p style="color:#8b949e;font-size:11px;margin:0;">✨ Tambahkan GEMINI_API_KEY di secrets.toml untuk AI penuh</p>
                 </div>
                 """, unsafe_allow_html=True)
-                gemini_data = None
-                ai_action   = formula_decision if formula_decision == "ENTER" else "HOLD"
-                ai_entry    = bid
-                ai_tp1 = ai_tp2 = ai_sl = 0
+                # Fallback: pakai formula engine (bukan pesan error)
+                gemini_data = formula_signal_engine(df, symbol, bid, digits)
+                if gemini_data:
+                    gemini_data["_ts"] = __import__("datetime").datetime.now().strftime("%H:%M:%S")
+                    st.session_state["gemini_result_mt5"] = gemini_data
+                    ai_action = gemini_data["action"]
+                    ai_entry  = gemini_data["entry"]
+                    ai_tp1    = gemini_data["tp1"]
+                    ai_tp2    = gemini_data["tp2"]
+                    ai_sl     = gemini_data["sl"]
+                    conf_bar_color = "#f0883e"
+                    # Re-render dengan formula data
+                    st.rerun()
+                else:
+                    ai_action = "HOLD"
+                    ai_entry = bid
+                    ai_tp1 = ai_tp2 = ai_sl = 0
 
             reasoning_container = st.container()
 
@@ -1289,8 +1398,11 @@ with tab1:
         with col_m2:
             leverage = st.selectbox("⚡ Leverage", [1, 10, 50, 100, 200, 500], index=3)
 
-        if df is not None and gemini_data and gemini_data.get("ai_active") and ai_action in ("BUY","SELL"):
-            # Gunakan level dari Gemini langsung
+        _has_plan = df is not None and gemini_data and gemini_data.get("ai_active") and ai_action in ("BUY","SELL")
+        if _has_plan:
+            # Level dari Gemini atau Formula (sama struktur datanya)
+            _plan_src = gemini_data.get("source","gemini")
+            _plan_lbl = "✨ Level dari Gemini AI" if _plan_src=="gemini" else "📐 Level dari Formula"
             g_entry = gemini_data["entry"]
             g_tp1   = gemini_data["tp1"]
             g_tp2   = gemini_data["tp2"]
@@ -1367,8 +1479,10 @@ with tab1:
             """, unsafe_allow_html=True)
 
         elif df is not None and ai_action == "HOLD":
-            ai_reason_disp = gemini_data.get("reason","") if gemini_data else formula_reason
-            st.info(f"🔵 HOLD — {ai_reason_disp or 'Belum ada setup yang cukup bagus saat ini.'}")
+            _hold_reason = gemini_data.get("reason","") if gemini_data else formula_reason
+            _hold_src    = gemini_data.get("source","gemini") if gemini_data else "formula"
+            _hold_badge  = "🤖 Gemini" if _hold_src=="gemini" else "📐 Formula"
+            st.info(f"🔵 HOLD [{_hold_badge}] — {_hold_reason or 'Belum ada setup yang cukup bagus saat ini.'}")
             if gemini_data and gemini_data.get("market_reco"):
                 st.markdown(f"""
                 <div style="background:#1b1f2d; border:1px solid #388bfd; border-radius:8px; padding:10px 14px; margin-top:8px;">
@@ -1429,8 +1543,8 @@ with tab1:
                     </p>
                 </div>
                 """, unsafe_allow_html=True)
-                if not GEMINI_ENABLED:
-                    st.caption("✨ Tambahkan GEMINI_API_KEY di secrets.toml untuk AI penuh")
+                _mode_info = "Gemini aktif" if (use_gemini and GEMINI_ENABLED) else "Formula Engine aktif"
+                st.caption(f"📐 {_mode_info} — klik Refresh untuk analisis baru")
     
 # ─── TAB 2: MULTI TIMEFRAME ───
 with tab2:
@@ -1725,7 +1839,7 @@ with tab5:
             📊 Leverage: <span style="color:#e6edf3;">1:{account.leverage}</span><br>
             🔗 Status: <span style="color:#3fb950;">🟢 Connected</span><br>
             ✨ Gemini: <span style="color:#e6edf3;">{"🟢 Aktif" if GEMINI_ENABLED else "🔴 Tidak aktif"}</span><br>
-            ⚙️ Version: <span style="color:#e6edf3;">v4.2 (3-Mode + Gemini Decision Engine)</span><br>
+            ⚙️ Version: <span style="color:#e6edf3;">v4.5 (3-Mode + Gemini Decision Engine)</span><br>
             </p>
         </div>
         """, unsafe_allow_html=True)
