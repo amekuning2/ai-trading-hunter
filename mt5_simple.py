@@ -10,7 +10,7 @@ import json
 #  CONFIG
 # ─────────────────────────────────────────────
 st.set_page_config(
-    page_title="MT5 Lite",
+    page_title="MT5 Lite v3.5",
     page_icon="⚡",
     layout="centered",
     initial_sidebar_state="collapsed"
@@ -375,7 +375,7 @@ for k, v in {
 # ─────────────────────────────────────────────
 #  HEADER
 # ─────────────────────────────────────────────
-st.markdown("## 📊 MT5 Lite")
+st.markdown("## 📊 MT5 Lite v3.5")
 
 # ─────────────────────────────────────────────
 #  CONTROLS
