@@ -116,7 +116,11 @@ except Exception:
 
 GEMINI_ENABLED = bool(GEMINI_API_KEY)
 if GEMINI_ENABLED:
-    genai.configure(api_key=GEMINI_API_KEY)
+    client = genai.Client(api_key=GEMINI_API_KEY)
+    response = client.models.generate_content(
+        model="gemini-3.1-flash-lite",
+        contents=prompt
+    )
 
 GEMINI_MODEL = "gemini-3.1-flash-lite"
 
