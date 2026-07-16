@@ -183,10 +183,14 @@ def get_klines(symbol, interval, limit=200):
             return None
         tf = TIMEFRAME_MAP.get(interval, mt5.TIMEFRAME_M15)
         rates = mt5.copy_rates_from_pos(symbol, tf, 0, limit)
-        # MT5 kadang belum selesai sync history data candle-nya,
-        # retry sebentar sebelum nyerah
-        if rates is None or len(rates) == 0:
-            time.sleep(0.5)
+        # History untuk kombinasi symbol+timeframe yang belum pernah
+        # dibuka sebagai chart di terminal butuh waktu buat di-download
+        # dari server broker dulu. Retry bertahap sambil nunggu sync.
+        retry_delays = [1, 2, 3]
+        for delay in retry_delays:
+            if rates is not None and len(rates) > 0:
+                break
+            time.sleep(delay)
             rates = mt5.copy_rates_from_pos(symbol, tf, 0, limit)
         if rates is None or len(rates) == 0:
             st.session_state["_last_chart_error"] = f"copy_rates_from_pos kosong: {mt5.last_error()}"

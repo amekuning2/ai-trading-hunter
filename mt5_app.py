@@ -345,7 +345,7 @@ def get_mt5_price(symbol):
     except:
         return None
 
-@st.cache_data(ttl=60)
+@st.cache_data(ttl=15)
 def get_mt5_klines(symbol, timeframe_str, limit):
     try:
         if not mt5.symbol_select(symbol, True):
@@ -353,8 +353,14 @@ def get_mt5_klines(symbol, timeframe_str, limit):
             return None
         tf = TIMEFRAME_MAP.get(timeframe_str, mt5.TIMEFRAME_H1)
         rates = mt5.copy_rates_from_pos(symbol, tf, 0, limit)
-        if rates is None or len(rates) == 0:
-            time.sleep(0.5)
+        # History untuk kombinasi symbol+timeframe yang belum pernah
+        # dibuka sebagai chart di terminal butuh waktu buat di-download
+        # dari server broker dulu. Retry bertahap sambil nunggu sync.
+        retry_delays = [1, 2, 3]
+        for delay in retry_delays:
+            if rates is not None and len(rates) > 0:
+                break
+            time.sleep(delay)
             rates = mt5.copy_rates_from_pos(symbol, tf, 0, limit)
         if rates is None or len(rates) == 0:
             st.session_state["_last_chart_error"] = f"copy_rates_from_pos kosong: {mt5.last_error()}"
