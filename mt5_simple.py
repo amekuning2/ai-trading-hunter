@@ -2,8 +2,9 @@ import streamlit as st
 import pandas as pd
 import MetaTrader5 as mt5
 import ta
+import time
 from datetime import datetime
-import google.generativeai as genai
+from google import genai
 import json
 
 # ─────────────────────────────────────────────
@@ -115,23 +116,33 @@ except Exception:
     GEMINI_API_KEY = ""
 
 GEMINI_ENABLED = bool(GEMINI_API_KEY)
-if GEMINI_ENABLED:
-    genai.configure(api_key=GEMINI_API_KEY)
-
 GEMINI_MODEL = "gemini-3.1-flash-lite"
+if GEMINI_ENABLED:
+    gemini_client = genai.Client(api_key=GEMINI_API_KEY)
 
 # ─────────────────────────────────────────────
 #  MT5 INIT
 # ─────────────────────────────────────────────
-@st.cache_resource
+
 def init_mt5():
     # Coba initialize beberapa kali kalau gagal pertama
     for attempt in range(3):
         if mt5.initialize():
-            return True
+            return True, None
         mt5.shutdown()
         import time; time.sleep(1)
-    return False
+    return False, mt5.last_error()
+
+# Panggil TANPA cache_resource, atau kasih retry logic
+if "mt5_connected" not in st.session_state:
+    ok, err = init_mt5()
+    st.session_state.mt5_connected = ok
+    if not ok:
+        st.error(f"Gagal konek MT5: {err}")
+        if st.button("🔄 Retry Koneksi"):
+            st.session_state.mt5_connected = False
+            st.rerun()
+        st.stop()
 
 TIMEFRAME_MAP = {
     "1m":  mt5.TIMEFRAME_M1,
@@ -167,17 +178,32 @@ def get_price(symbol):
 
 def get_klines(symbol, interval, limit=200):
     try:
-        tf    = TIMEFRAME_MAP.get(interval, mt5.TIMEFRAME_M15)
+        if not mt5.symbol_select(symbol, True):
+            st.session_state["_last_chart_error"] = f"symbol_select gagal: {mt5.last_error()}"
+            return None
+        tf = TIMEFRAME_MAP.get(interval, mt5.TIMEFRAME_M15)
         rates = mt5.copy_rates_from_pos(symbol, tf, 0, limit)
+        # History untuk kombinasi symbol+timeframe yang belum pernah
+        # dibuka sebagai chart di terminal butuh waktu buat di-download
+        # dari server broker dulu. Retry bertahap sambil nunggu sync.
+        retry_delays = [1, 2, 3]
+        for delay in retry_delays:
+            if rates is not None and len(rates) > 0:
+                break
+            time.sleep(delay)
+            rates = mt5.copy_rates_from_pos(symbol, tf, 0, limit)
         if rates is None or len(rates) == 0:
+            st.session_state["_last_chart_error"] = f"copy_rates_from_pos kosong: {mt5.last_error()}"
             return None
         df = pd.DataFrame(rates)
         df["timestamp"] = pd.to_datetime(df["time"], unit="s")
         df = df.rename(columns={"tick_volume": "volume"})
         for c in ["open","high","low","close","volume"]:
             df[c] = df[c].astype(float)
+        st.session_state["_last_chart_error"] = None
         return df
-    except:
+    except Exception as e:
+        st.session_state["_last_chart_error"] = f"Exception: {e}"
         return None
 
 def get_sr(df, n=2):
@@ -347,8 +373,11 @@ BALAS HANYA JSON:
 }}
 """
     try:
-        model    = genai.GenerativeModel(GEMINI_MODEL)
-        response = model.generate_content(prompt, generation_config={"response_mime_type":"application/json"})
+        response = gemini_client.models.generate_content(
+            model=GEMINI_MODEL,
+            contents=prompt,
+            config={"response_mime_type": "application/json"}
+        )
         data     = json.loads(response.text.strip())
         return {
             "action":     data.get("action","HOLD"),
@@ -480,7 +509,11 @@ if do_refresh and bid > 0:
     df = get_klines(symbol, interval_val, 200)
     res, sup = get_sr(df) if df is not None else ([], [])
 
-    if use_gemini and GEMINI_ENABLED:
+    if df is None:
+        err_detail = st.session_state.get("_last_chart_error", "unknown")
+        st.error(f"Gagal ambil data candle — {err_detail}")
+        result = None
+    elif use_gemini and GEMINI_ENABLED:
         with st.status("🤖 Gemini menganalisis...", expanded=False):
             result = call_gemini(symbol, interval_val, trading_mode,
                                   df, bid, ask, spread, digits, res, sup)

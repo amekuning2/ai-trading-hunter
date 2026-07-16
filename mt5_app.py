@@ -6,7 +6,7 @@ import MetaTrader5 as mt5
 import ta
 import time
 from datetime import datetime
-import google.generativeai as genai
+from google import genai
 import json
 
 # ─────────────────────────────────────────────
@@ -93,8 +93,10 @@ except Exception:
     GEMINI_API_KEY = ""
 
 GEMINI_ENABLED = bool(GEMINI_API_KEY)
+GEMINI_MODEL = "gemini-3.1-flash-lite"
 if GEMINI_ENABLED:
-    genai.configure(api_key=GEMINI_API_KEY)
+    gemini_client = genai.Client(api_key=GEMINI_API_KEY)
+
 
 # ─────────────────────────────────────────────
 #  FORMULA FALLBACK ENGINE
@@ -273,10 +275,10 @@ WAJIB BALAS HANYA FORMAT JSON INI:
 }}
 """
     try:
-        model = genai.GenerativeModel("gemini-3.1-flash-lite")
-        response = model.generate_content(
-            prompt,
-            generation_config={"response_mime_type": "application/json"}
+        response = gemini_client.models.generate_content(
+            model=GEMINI_MODEL,
+            contents=prompt,
+            config={"response_mime_type": "application/json"}
         )
         data = json.loads(response.text.strip())
         return {
@@ -295,11 +297,22 @@ WAJIB BALAS HANYA FORMAT JSON INI:
         empty["reason"] = f"Gemini error: {str(e)}"
         return empty
 
-@st.cache_resource
+
 def init_mt5():
     if not mt5.initialize():
-        return False
-    return True
+        return False, mt5.last_error()
+    return True, None
+
+# Panggil TANPA cache_resource, atau kasih retry logic
+if "mt5_connected" not in st.session_state:
+    ok, err = init_mt5()
+    st.session_state.mt5_connected = ok
+    if not ok:
+        st.error(f"Gagal konek MT5: {err}")
+        if st.button("🔄 Retry Koneksi"):
+            st.session_state.mt5_connected = False
+            st.rerun()
+        st.stop()
 
 # ─────────────────────────────────────────────
 #  DATA FUNCTIONS
@@ -332,21 +345,35 @@ def get_mt5_price(symbol):
     except:
         return None
 
-@st.cache_data(ttl=60)
+@st.cache_data(ttl=15)
 def get_mt5_klines(symbol, timeframe_str, limit):
     try:
-        mt5.symbol_select(symbol, True)
+        if not mt5.symbol_select(symbol, True):
+            st.session_state["_last_chart_error"] = f"symbol_select gagal: {mt5.last_error()}"
+            return None
         tf = TIMEFRAME_MAP.get(timeframe_str, mt5.TIMEFRAME_H1)
         rates = mt5.copy_rates_from_pos(symbol, tf, 0, limit)
-        if rates is None:
+        # History untuk kombinasi symbol+timeframe yang belum pernah
+        # dibuka sebagai chart di terminal butuh waktu buat di-download
+        # dari server broker dulu. Retry bertahap sambil nunggu sync.
+        retry_delays = [1, 2, 3]
+        for delay in retry_delays:
+            if rates is not None and len(rates) > 0:
+                break
+            time.sleep(delay)
+            rates = mt5.copy_rates_from_pos(symbol, tf, 0, limit)
+        if rates is None or len(rates) == 0:
+            st.session_state["_last_chart_error"] = f"copy_rates_from_pos kosong: {mt5.last_error()}"
             return None
         df = pd.DataFrame(rates)
         df["time"] = pd.to_datetime(df["time"], unit="s")
         df = df.rename(columns={"time": "timestamp", "tick_volume": "volume"})
         for col in ["open", "high", "low", "close", "volume"]:
             df[col] = df[col].astype(float)
+        st.session_state["_last_chart_error"] = None
         return df
-    except:
+    except Exception as e:
+        st.session_state["_last_chart_error"] = f"Exception: {e}"
         return None
 
 @st.cache_data(ttl=60)
@@ -1179,7 +1206,8 @@ with tab1:
             fig = build_chart(df, symbol, resistances, supports)
             st.plotly_chart(fig, use_container_width=True)
         else:
-            st.error("Gagal load chart data")
+            err_detail = st.session_state.get("_last_chart_error", "unknown")
+            st.error(f"Gagal load chart data — {err_detail}")
 
         # Filled after signal calculation, but rendered directly below the chart.
         trading_plan_container = st.container()
@@ -1491,7 +1519,7 @@ with tab1:
                     </p>
                 </div>
                 """, unsafe_allow_html=True)
-
+    
     # AI Reasoning — sekarang full dari Gemini
     if df is not None:
         with reasoning_container:
@@ -1545,7 +1573,7 @@ with tab1:
                 """, unsafe_allow_html=True)
                 _mode_info = "Gemini aktif" if (use_gemini and GEMINI_ENABLED) else "Formula Engine aktif"
                 st.caption(f"📐 {_mode_info} — klik Refresh untuk analisis baru")
-
+    
 # ─── TAB 2: MULTI TIMEFRAME ───
 with tab2:
     st.markdown('<p class="section-header">🕐 Multi-Timeframe Analysis</p>', unsafe_allow_html=True)
