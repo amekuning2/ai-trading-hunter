@@ -1192,7 +1192,7 @@ with tab1:
         if m == "Scalping":  return "⚡ Scalping — M1-M15, TP cepat, agresif"
         if m == "Intraday":  return "🎯 Intraday — M15-H1, balance frekuensi & kualitas"
         return "🛡️ Swing — H4-D1, selektif, RR besar"
-    trading_mode = st.selectbox("🎯 Trading Mode", ["Scalping","Intraday","Swing"], format_func=_mt5_mode_label)
+    trading_mode = st.selectbox("⚙️ Mode", ["Aggressive","Scalping","Intraday"], key="mode_input")
 
     col_tf, col_candle = st.columns([2, 1])
     with col_tf:
@@ -1281,7 +1281,11 @@ with tab1:
         if df is not None:
             # 2. Proses Engine
             df = detect_price_structure(df)
-            signal, reason = generate_signals(df, mode, market_context)
+            signal, reason = generate_signals(
+            df, 
+            st.session_state.get('mode_input', 'Scalping'),  # Sesuai dengan key UI
+            st.session_state.get('market_context', 'Neutral')
+        )
 
             def find_supply_demand_zones(df, n=10):
                 """Mencari area Supply (Resistansi) dan Demand (Support) berdasarkan swing terakhir"""
