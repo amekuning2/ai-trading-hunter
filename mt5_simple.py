@@ -128,10 +128,21 @@ def init_mt5():
     # Coba initialize beberapa kali kalau gagal pertama
     for attempt in range(3):
         if mt5.initialize():
-            return True
+            return True, None
         mt5.shutdown()
         import time; time.sleep(1)
-    return False
+    return False, mt5.last_error()
+
+# Panggil TANPA cache_resource, atau kasih retry logic
+if "mt5_connected" not in st.session_state:
+    ok, err = init_mt5()
+    st.session_state.mt5_connected = ok
+    if not ok:
+        st.error(f"Gagal konek MT5: {err}")
+        if st.button("🔄 Retry Koneksi"):
+            st.session_state.mt5_connected = False
+            st.rerun()
+        st.stop()
 
 TIMEFRAME_MAP = {
     "1m":  mt5.TIMEFRAME_M1,

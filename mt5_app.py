@@ -298,8 +298,19 @@ WAJIB BALAS HANYA FORMAT JSON INI:
 @st.cache_resource
 def init_mt5():
     if not mt5.initialize():
-        return False
-    return True
+        return False, mt5.last_error()
+    return True, None
+
+# Panggil TANPA cache_resource, atau kasih retry logic
+if "mt5_connected" not in st.session_state:
+    ok, err = init_mt5()
+    st.session_state.mt5_connected = ok
+    if not ok:
+        st.error(f"Gagal konek MT5: {err}")
+        if st.button("🔄 Retry Koneksi"):
+            st.session_state.mt5_connected = False
+            st.rerun()
+        st.stop()
 
 # ─────────────────────────────────────────────
 #  DATA FUNCTIONS
