@@ -1017,7 +1017,7 @@ def generate_trading_plan(df, current_price, signal, supports, resistances, moda
 #  Input  : signal, decision, decision_reason, score_detail, indicators, supports, resistances
 #  Output : (points: list[str], conclusion: str, conclusion_color: str)
 # ─────────────────────────────────────────────
-def generate_ai_reasoning(signal, decision, decision_reason, score_detail, indicators, supports, resistances, trading_mode="Ketat"):
+def generate_ai_reasoning(signal, decision, decision_reason, score_detail, indicators, supports, resistances, zones, trading_mode="Ketat"):
     if signal == "HOLD":
         points = [
             "Tidak ada bias arah yang cukup jelas dari kombinasi Trend, Momentum, dan Structure saat ini.",
