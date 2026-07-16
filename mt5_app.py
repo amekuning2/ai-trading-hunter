@@ -1097,7 +1097,7 @@ def generate_ai_reasoning(signal, decision, decision_reason, score_detail, indic
 # ─────────────────────────────────────────────
 #  CHART
 # ─────────────────────────────────────────────
-def build_chart(df, symbol, resistances=[], supports=[]):
+def build_chart(df, symbol, resistances=[], supports=[], zones=[]):
     fig = make_subplots(rows=3, cols=1, shared_xaxes=True, vertical_spacing=0.03, row_heights=[0.6, 0.2, 0.2])
 
     # Plot Order Block Zones (Supply/Demand)
