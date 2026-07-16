@@ -1313,15 +1313,17 @@ with tab1:
 
     with col_chart:
         st.markdown('<p class="section-header">Price Chart</p>', unsafe_allow_html=True)
-        if df is not None:
-            df_chart = st.session_state.get('df_data')
-            if df_chart is not None:
-                zones = find_supply_demand_zones(df_chart) 
-                fig = build_chart(df_chart, symbol, resistances, supports, zones=zones)
-                st.plotly_chart(fig, use_container_width=True)
+
+        df_chart = st.session_state.get('df_data')
+
+        if df_chart is not None and not df_chart.empty:
+            # Jika data ada, gambar chart
+            zones = find_supply_demand_zones(df_chart)
+            fig = build_chart(df_chart, symbol, resistances, supports, zones=zones)
+            st.plotly_chart(fig, use_container_width=True)
         else:
-            err_detail = st.session_state.get("_last_chart_error", "Data belum dimuat")
-            st.error(f"Gagal load chart data — {err_detail}")
+            # Jika data belum ada, tampilkan pesan ramah (bukan error)
+            st.info("👈 Tekan tombol 'Refresh Analisis' di samping untuk memuat chart.")
 
         # Placeholder container for layout balance
         trading_plan_container = st.container()
@@ -1979,7 +1981,7 @@ with tab5:
             📊 Leverage: <span style="color:#e6edf3;">1:{account.leverage}</span><br>
             🔗 Status: <span style="color:#3fb950;">🟢 Connected</span><br>
             ✨ Gemini: <span style="color:#e6edf3;">{"🟢 Aktif" if GEMINI_ENABLED else "🔴 Tidak aktif"}</span><br>
-            ⚙️ Version: <span style="color:#e6edf3;">v4.5 (3-Mode + Gemini Decision Engine)</span><br>
+            ⚙️ Version: <span style="color:#e6edf3;">v5.0 (3-Mode + Gemini Decision Engine)</span><br>
             </p>
         </div>
         """, unsafe_allow_html=True)
