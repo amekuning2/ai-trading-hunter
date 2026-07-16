@@ -3,7 +3,7 @@ import pandas as pd
 import MetaTrader5 as mt5
 import ta
 from datetime import datetime
-import google.generativeai as genai
+from google import genai
 import json
 
 # ─────────────────────────────────────────────

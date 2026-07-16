@@ -6,7 +6,7 @@ import MetaTrader5 as mt5
 import ta
 import time
 from datetime import datetime
-import google.generativeai as genai
+from google import genai
 import json
 
 # ─────────────────────────────────────────────
