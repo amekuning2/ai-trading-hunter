@@ -348,18 +348,26 @@ def get_mt5_price(symbol):
 @st.cache_data(ttl=60)
 def get_mt5_klines(symbol, timeframe_str, limit):
     try:
-        mt5.symbol_select(symbol, True)
+        if not mt5.symbol_select(symbol, True):
+            st.session_state["_last_chart_error"] = f"symbol_select gagal: {mt5.last_error()}"
+            return None
         tf = TIMEFRAME_MAP.get(timeframe_str, mt5.TIMEFRAME_H1)
         rates = mt5.copy_rates_from_pos(symbol, tf, 0, limit)
-        if rates is None:
+        if rates is None or len(rates) == 0:
+            time.sleep(0.5)
+            rates = mt5.copy_rates_from_pos(symbol, tf, 0, limit)
+        if rates is None or len(rates) == 0:
+            st.session_state["_last_chart_error"] = f"copy_rates_from_pos kosong: {mt5.last_error()}"
             return None
         df = pd.DataFrame(rates)
         df["time"] = pd.to_datetime(df["time"], unit="s")
         df = df.rename(columns={"time": "timestamp", "tick_volume": "volume"})
         for col in ["open", "high", "low", "close", "volume"]:
             df[col] = df[col].astype(float)
+        st.session_state["_last_chart_error"] = None
         return df
-    except:
+    except Exception as e:
+        st.session_state["_last_chart_error"] = f"Exception: {e}"
         return None
 
 @st.cache_data(ttl=60)
@@ -1192,7 +1200,8 @@ with tab1:
             fig = build_chart(df, symbol, resistances, supports)
             st.plotly_chart(fig, use_container_width=True)
         else:
-            st.error("Gagal load chart data")
+            err_detail = st.session_state.get("_last_chart_error", "unknown")
+            st.error(f"Gagal load chart data — {err_detail}")
 
         # Filled after signal calculation, but rendered directly below the chart.
         trading_plan_container = st.container()

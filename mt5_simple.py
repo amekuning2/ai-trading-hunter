@@ -2,6 +2,7 @@ import streamlit as st
 import pandas as pd
 import MetaTrader5 as mt5
 import ta
+import time
 from datetime import datetime
 from google import genai
 import json
@@ -177,17 +178,28 @@ def get_price(symbol):
 
 def get_klines(symbol, interval, limit=200):
     try:
-        tf    = TIMEFRAME_MAP.get(interval, mt5.TIMEFRAME_M15)
+        if not mt5.symbol_select(symbol, True):
+            st.session_state["_last_chart_error"] = f"symbol_select gagal: {mt5.last_error()}"
+            return None
+        tf = TIMEFRAME_MAP.get(interval, mt5.TIMEFRAME_M15)
         rates = mt5.copy_rates_from_pos(symbol, tf, 0, limit)
+        # MT5 kadang belum selesai sync history data candle-nya,
+        # retry sebentar sebelum nyerah
         if rates is None or len(rates) == 0:
+            time.sleep(0.5)
+            rates = mt5.copy_rates_from_pos(symbol, tf, 0, limit)
+        if rates is None or len(rates) == 0:
+            st.session_state["_last_chart_error"] = f"copy_rates_from_pos kosong: {mt5.last_error()}"
             return None
         df = pd.DataFrame(rates)
         df["timestamp"] = pd.to_datetime(df["time"], unit="s")
         df = df.rename(columns={"tick_volume": "volume"})
         for c in ["open","high","low","close","volume"]:
             df[c] = df[c].astype(float)
+        st.session_state["_last_chart_error"] = None
         return df
-    except:
+    except Exception as e:
+        st.session_state["_last_chart_error"] = f"Exception: {e}"
         return None
 
 def get_sr(df, n=2):
@@ -493,7 +505,11 @@ if do_refresh and bid > 0:
     df = get_klines(symbol, interval_val, 200)
     res, sup = get_sr(df) if df is not None else ([], [])
 
-    if use_gemini and GEMINI_ENABLED:
+    if df is None:
+        err_detail = st.session_state.get("_last_chart_error", "unknown")
+        st.error(f"Gagal ambil data candle — {err_detail}")
+        result = None
+    elif use_gemini and GEMINI_ENABLED:
         with st.status("🤖 Gemini menganalisis...", expanded=False):
             result = call_gemini(symbol, interval_val, trading_mode,
                                   df, bid, ask, spread, digits, res, sup)
