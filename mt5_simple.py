@@ -123,7 +123,7 @@ GEMINI_MODEL = "gemini-3.1-flash-lite"
 # ─────────────────────────────────────────────
 #  MT5 INIT
 # ─────────────────────────────────────────────
-@st.cache_resource
+
 def init_mt5():
     # Coba initialize beberapa kali kalau gagal pertama
     for attempt in range(3):

@@ -295,7 +295,7 @@ WAJIB BALAS HANYA FORMAT JSON INI:
         empty["reason"] = f"Gemini error: {str(e)}"
         return empty
 
-@st.cache_resource
+
 def init_mt5():
     if not mt5.initialize():
         return False, mt5.last_error()
