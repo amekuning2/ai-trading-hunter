@@ -6,12 +6,24 @@ import MetaTrader5 as mt5
 import ta
 import time
 from datetime import datetime
-import google.generativeai as genai
+from google import genai
 import json
+import threading
 
 # ─────────────────────────────────────────────
 #  CONFIG
 # ─────────────────────────────────────────────
+TICKER_MAP = {
+    "XAUUSD": "GOLD", 
+    # Tambahkan mapping lain di sini jika broker Anda punya nama khusus
+    # Contoh: "EURUSD": "EURUSD.m"
+}
+def validate_symbol(symbol):
+    if not mt5.symbol_select(symbol, True):
+        print(f"Error: Simbol {symbol} tidak ditemukan di Market Watch!")
+        return False
+    return True
+
 st.set_page_config(
     page_title="MT5 Forex Dashboard",
     page_icon="📊",
@@ -81,9 +93,10 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-# ─────────────────────────────────────────────
-#  MT5 CONNECTION
-# ─────────────────────────────────────────────
+# --- GLOBAL MT5 LOCK ---
+# Threading lock digunakan agar proses pemanggilan data tidak saling tabrakan di background
+mt5_lock = threading.Lock()
+
 # ─────────────────────────────────────────────
 #  GEMINI API SETUP
 # ─────────────────────────────────────────────
@@ -93,8 +106,9 @@ except Exception:
     GEMINI_API_KEY = ""
 
 GEMINI_ENABLED = bool(GEMINI_API_KEY)
+GEMINI_MODEL = "gemini-3.1-flash-lite"
 if GEMINI_ENABLED:
-    genai.configure(api_key=GEMINI_API_KEY)
+    gemini_client = genai.Client(api_key=GEMINI_API_KEY)
 
 # ─────────────────────────────────────────────
 #  FORMULA FALLBACK ENGINE
@@ -177,8 +191,6 @@ def get_gemini_full_analysis(symbol, interval, trading_mode,
         return empty
 
     # Safety net minimal — block hanya kalau kondisi benar-benar chaos
-    # Tidak ada threshold score tinggi, tidak ada gate berlapis
-    # ATR terlalu tinggi = market chaos, skip dulu
     try:
         if atr > current_price * 0.015:  # ATR > 1.5% dari harga = chaos ekstrem
             empty["reason"] = "Market terlalu volatile saat ini, tunggu sebentar"
@@ -273,10 +285,10 @@ WAJIB BALAS HANYA FORMAT JSON INI:
 }}
 """
     try:
-        model = genai.GenerativeModel("gemini-3.1-flash-lite")
-        response = model.generate_content(
-            prompt,
-            generation_config={"response_mime_type": "application/json"}
+        response = gemini_client.models.generate_content(
+            model=GEMINI_MODEL,
+            contents=prompt,
+            config={"response_mime_type": "application/json"}
         )
         data = json.loads(response.text.strip())
         return {
@@ -295,11 +307,22 @@ WAJIB BALAS HANYA FORMAT JSON INI:
         empty["reason"] = f"Gemini error: {str(e)}"
         return empty
 
-@st.cache_resource
 def init_mt5():
-    if not mt5.initialize():
-        return False
-    return True
+    with mt5_lock:
+        if not mt5.initialize():
+            return False, mt5.last_error()
+        return True, None
+
+# Panggil TANPA cache_resource, atau kasih retry logic
+if "mt5_connected" not in st.session_state:
+    ok, err = init_mt5()
+    st.session_state.mt5_connected = ok
+    if not ok:
+        st.error(f"Gagal konek MT5: {err}")
+        if st.button("🔄 Retry Koneksi"):
+            st.session_state.mt5_connected = False
+            st.rerun()
+        st.stop()
 
 # ─────────────────────────────────────────────
 #  DATA FUNCTIONS
@@ -315,10 +338,13 @@ TIMEFRAME_MAP = {
 
 @st.cache_data(ttl=30)
 def get_mt5_price(symbol):
+    # Resolve ticker name dari map
+    actual_symbol = TICKER_MAP.get(symbol, symbol)
     try:
-        mt5.symbol_select(symbol, True)
-        tick = mt5.symbol_info_tick(symbol)
-        info = mt5.symbol_info(symbol)
+        with mt5_lock:
+            mt5.symbol_select(actual_symbol, True)
+            tick = mt5.symbol_info_tick(actual_symbol)
+            info = mt5.symbol_info(actual_symbol)
         if tick is None or info is None:
             return None
         if tick.bid == 0.0 and tick.ask == 0.0:
@@ -332,31 +358,62 @@ def get_mt5_price(symbol):
     except:
         return None
 
-@st.cache_data(ttl=60)
+@st.cache_data(ttl=15)
 def get_mt5_klines(symbol, timeframe_str, limit):
+    # Resolve ticker name dari map
+    actual_symbol = TICKER_MAP.get(symbol, symbol)
     try:
-        mt5.symbol_select(symbol, True)
+        with mt5_lock:
+            selected = mt5.symbol_select(actual_symbol, True)
+            if not selected:
+                err = mt5.last_error()
+        if not selected:
+            st.session_state["_last_chart_error"] = f"symbol_select gagal: {err}"
+            return None
         tf = TIMEFRAME_MAP.get(timeframe_str, mt5.TIMEFRAME_H1)
-        rates = mt5.copy_rates_from_pos(symbol, tf, 0, limit)
-        if rates is None:
+        
+        with mt5_lock:
+            rates = mt5.copy_rates_from_pos(actual_symbol, tf, 0, limit)
+            
+        # History sync retry jika server broker belum sempat mendownload data
+        retry_delays = [1, 2, 3]
+        for delay in retry_delays:
+            if rates is not None and len(rates) > 0:
+                break
+            time.sleep(delay)
+            with mt5_lock:
+                rates = mt5.copy_rates_from_pos(actual_symbol, tf, 0, limit)
+                
+        if rates is None or len(rates) == 0:
+            with mt5_lock:
+                err = mt5.last_error()
+            st.session_state["_last_chart_error"] = f"copy_rates_from_pos kosong: {err}"
             return None
         df = pd.DataFrame(rates)
         df["time"] = pd.to_datetime(df["time"], unit="s")
         df = df.rename(columns={"time": "timestamp", "tick_volume": "volume"})
         for col in ["open", "high", "low", "close", "volume"]:
             df[col] = df[col].astype(float)
+        st.session_state["_last_chart_error"] = None
         return df
-    except:
+    except Exception as e:
+        st.session_state["_last_chart_error"] = f"Exception: {e}"
         return None
 
 @st.cache_data(ttl=60)
 def get_all_prices(pairs):
     result = []
     for symbol in pairs:
-        tick = mt5.symbol_info_tick(symbol)
-        info = mt5.symbol_info(symbol)
+        # Tambahkan pemetaan di sini
+        actual_symbol = TICKER_MAP.get(symbol, symbol)
+
+        with mt5_lock:
+            # Gunakan actual_symbol untuk fungsi MT5
+            tick = mt5.symbol_info_tick(actual_symbol)
+            info = mt5.symbol_info(actual_symbol)
+            rates = mt5.copy_rates_from_pos(actual_symbol, mt5.TIMEFRAME_D1, 0, 2)
+            
         if tick and info:
-            rates = mt5.copy_rates_from_pos(symbol, mt5.TIMEFRAME_D1, 0, 2)
             if rates is not None and len(rates) >= 2:
                 prev_close = rates[-2]["close"]
                 curr_price = tick.bid
@@ -382,9 +439,9 @@ def calculate_signal(df, mtf_score_override=None):
     Returns:
         signal       : "BUY" | "SELL" | "HOLD"
         reason       : string deskripsi
-        signals      : dict badge indikator (kompatibel UI lama)
+        signals      : dict badge indikator
         indicators   : dict nilai mentah indikator
-        confidence   : int 0-100 (pengganti strength)
+        confidence   : int 0-100 (kekuatan bias searah)
         score_detail : dict breakdown per kategori
     """
     if df is None or len(df) < 50:
@@ -565,6 +622,7 @@ def calculate_signal(df, mtf_score_override=None):
     # ── TOTAL ──────────────────────────────────
     total_score = trend_score + momentum_score + structure_score + mtf_score + volume_score
     weighted_bias = (trend_bias * 35) + (momentum_bias * 25) + (structure_bias * 20)
+    
     # ── SIGNAL DECISION ────────────────────────
     if weighted_bias > 0 and total_score >= 60:
         signal = "BUY"
@@ -577,8 +635,6 @@ def calculate_signal(df, mtf_score_override=None):
     else:
         signal = "HOLD"
 
-    # Score mentah memakai skala bullish (tinggi = BUY, rendah = SELL).
-    # Ubah menjadi kekuatan searah bias agar BUY dan SELL dinilai simetris.
     if signal == "BUY":
         confidence = total_score
     elif signal == "SELL":
@@ -728,9 +784,6 @@ def calculate_trade_decision(signal, score_detail, df, supports, resistances, tr
     return "ENTER", f"Score {total}/100, RR 1:{rr_ratio:.1f}", "#3fb950"
 
 # ─────────────────────────────────────────────
-#  MULTI TIMEFRAME
-# ─────────────────────────────────────────────
-# ─────────────────────────────────────────────
 #  REAL MTF SCORE ENGINE
 #  Fetch 1H / 4H / 1D → score per TF → total 0-15
 #  Bobot: 1D=7, 4H=5, 1H=3
@@ -786,7 +839,6 @@ def calculate_mtf_score(symbol, current_tf, trading_mode="Ketat"):
     normalized = (total_score / total_weight) * 15
     return round(normalized)
 
-
 def multi_timeframe_analysis(symbol):
     timeframes = [("1H", "1h", 100), ("4H", "4h", 100), ("1D", "1d", 200)]
     results = []
@@ -823,7 +875,7 @@ def generate_trading_plan(df, current_price, signal, supports, resistances, moda
     if df is None or len(df) < 20 or signal == "HOLD":
         return None
 
-    atr   = ta.volatility.AverageTrueRange(df["high"], df["low"], df["close"], window=14).average_true_range().iloc[-1]
+    atr = ta.volatility.AverageTrueRange(df["high"], df["low"], df["close"], window=14).average_true_range().iloc[-1]
     entry = round(current_price, 5)
 
     if trading_mode == "Scalping":
@@ -880,9 +932,6 @@ def generate_trading_plan(df, current_price, signal, supports, resistances, moda
     tp3_pct = abs((tp3 - entry) / entry * 100)
     rr_ratio = round(tp1_pct / sl_pct, 2) if sl_pct > 0 else 0
 
-    # Auto-detect pip size & lot size berdasarkan harga
-    # Forex (< 100): pip = 0.00010, lot dari 100k unit
-    # Gold/Indices (>= 100): pip = 0.10, lot dari 10 unit
     if entry >= 100:
         pip_size = 0.10
         lot_size = round(modal_usd / (entry * 10), 4)
@@ -952,7 +1001,6 @@ def generate_ai_reasoning(signal, decision, decision_reason, score_detail, indic
 
     def cat_pct(score, max_score):
         raw_pct = (score / max_score * 100) if max_score else 0
-        # Score tinggi = bullish, score rendah = bearish (sesuai desain Signal Engine v2)
         return raw_pct if is_buy else (100 - raw_pct)
 
     trend_pct     = cat_pct(score_detail["trend"],     score_detail["trend_max"])
@@ -1067,15 +1115,16 @@ if "gemini_result_mt5"  not in st.session_state:
 # ─────────────────────────────────────────────
 #  MT5 INIT CHECK
 # ─────────────────────────────────────────────
-connected = init_mt5()
+# Memperbaiki logical tuple check: unpacking connected dan conn_err
+connected, conn_err = init_mt5()
 if not connected:
-    st.error("❌ Gagal konek ke MT5! Pastiin MetaTrader 5 sedang running di VPS.")
+    st.error(f"❌ Gagal konek ke MT5! Error: {conn_err}")
     st.stop()
 
 # ─────────────────────────────────────────────
 #  MAIN CONTENT
 # ─────────────────────────────────────────────
-DEFAULT_PAIRS = ["EURUSD", "GBPUSD", "USDJPY", "USDCHF", "AUDUSD", "XAUUSD"]
+DEFAULT_PAIRS = ["EURUSD", "GBPUSD", "USDJPY", "USDCHF", "AUDUSD", "GOLD"]
 
 col_sel1, col_sel2 = st.columns([2, 1])
 with col_sel1:
@@ -1179,9 +1228,10 @@ with tab1:
             fig = build_chart(df, symbol, resistances, supports)
             st.plotly_chart(fig, use_container_width=True)
         else:
-            st.error("Gagal load chart data")
+            err_detail = st.session_state.get("_last_chart_error", "unknown")
+            st.error(f"Gagal load chart data — {err_detail}")
 
-        # Filled after signal calculation, but rendered directly below the chart.
+        # Placeholder container for layout balance
         trading_plan_container = st.container()
 
     with col_signal:
@@ -1249,7 +1299,7 @@ with tab1:
 
                 # Simpan hasil ke session state
                 if gemini_data:
-                    gemini_data["_ts"] = __import__("datetime").datetime.now().strftime("%H:%M:%S")
+                    gemini_data["_ts"] = datetime.now().strftime("%H:%M:%S")
                     st.session_state["gemini_result_mt5"] = gemini_data
             else:
                 # Pakai hasil sebelumnya (tidak perlu Gemini lagi)
@@ -1337,7 +1387,7 @@ with tab1:
                 # Fallback: pakai formula engine (bukan pesan error)
                 gemini_data = formula_signal_engine(df, symbol, bid, digits)
                 if gemini_data:
-                    gemini_data["_ts"] = __import__("datetime").datetime.now().strftime("%H:%M:%S")
+                    gemini_data["_ts"] = datetime.now().strftime("%H:%M:%S")
                     st.session_state["gemini_result_mt5"] = gemini_data
                     ai_action = gemini_data["action"]
                     ai_entry  = gemini_data["entry"]
@@ -1491,7 +1541,7 @@ with tab1:
                     </p>
                 </div>
                 """, unsafe_allow_html=True)
-
+    
     # AI Reasoning — sekarang full dari Gemini
     if df is not None:
         with reasoning_container:
@@ -1545,7 +1595,7 @@ with tab1:
                 """, unsafe_allow_html=True)
                 _mode_info = "Gemini aktif" if (use_gemini and GEMINI_ENABLED) else "Formula Engine aktif"
                 st.caption(f"📐 {_mode_info} — klik Refresh untuk analisis baru")
-
+    
 # ─── TAB 2: MULTI TIMEFRAME ───
 with tab2:
     st.markdown('<p class="section-header">🕐 Multi-Timeframe Analysis</p>', unsafe_allow_html=True)
@@ -1702,10 +1752,6 @@ with tab4:
                 if outcome == "OPEN":
                     continue
 
-                # Auto-detect pip size berdasarkan harga
-                # Forex (EURUSD dll): harga < 100 → pip = 0.00010
-                # Gold (XAUUSD):      harga > 100 → pip = 0.10
-                # Indices/Oil:        fallback ke persentase
                 if entry_price < 10:
                     pip_size  = 0.00010   # JPY pairs & crypto-like
                 elif entry_price < 100:
@@ -1716,8 +1762,6 @@ with tab4:
                 sl_pips  = abs(entry_price - sl_bt) / pip_size
                 tp_pips  = abs(tp1_bt - entry_price) / pip_size
 
-                # Lot size: untuk gold, 1 lot = 100 oz, mini lot = 10 oz
-                # Estimasi lot dari modal: modal / (entry * 10) untuk gold
                 if entry_price > 100:
                     lot_size = round(bt_modal / (entry_price * 10), 4)
                 else:
@@ -1828,7 +1872,11 @@ with tab5:
         st.info("ℹ️ Auto refresh nonaktif")
 
     st.markdown("---")
-    account = mt5.account_info()
+    
+    # Membungkus pembacaan info akun ke lock thread-safe agar aman
+    with mt5_lock:
+        account = mt5.account_info()
+        
     if account:
         st.markdown(f"""
         <div style="background:#161b22; border:1px solid #30363d; border-radius:8px; padding:16px;">

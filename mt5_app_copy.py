@@ -6,12 +6,24 @@ import MetaTrader5 as mt5
 import ta
 import time
 from datetime import datetime
-import google.generativeai as genai
+from google import genai
 import json
+import threading
 
 # ─────────────────────────────────────────────
 #  CONFIG
 # ─────────────────────────────────────────────
+TICKER_MAP = {
+    "XAUUSD": "GOLD", 
+    # Tambahkan mapping lain di sini jika broker Anda punya nama khusus
+    # Contoh: "EURUSD": "EURUSD.m"
+}
+def validate_symbol(symbol):
+    if not mt5.symbol_select(symbol, True):
+        print(f"Error: Simbol {symbol} tidak ditemukan di Market Watch!")
+        return False
+    return True
+
 st.set_page_config(
     page_title="MT5 Forex Dashboard",
     page_icon="📊",
@@ -81,9 +93,10 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-# ─────────────────────────────────────────────
-#  MT5 CONNECTION
-# ─────────────────────────────────────────────
+# --- GLOBAL MT5 LOCK ---
+# Threading lock digunakan agar proses pemanggilan data tidak saling tabrakan di background
+mt5_lock = threading.Lock()
+
 # ─────────────────────────────────────────────
 #  GEMINI API SETUP
 # ─────────────────────────────────────────────
@@ -93,86 +106,223 @@ except Exception:
     GEMINI_API_KEY = ""
 
 GEMINI_ENABLED = bool(GEMINI_API_KEY)
+GEMINI_MODEL = "gemini-3.1-flash-lite"
 if GEMINI_ENABLED:
-    genai.configure(api_key=GEMINI_API_KEY)
+    gemini_client = genai.Client(api_key=GEMINI_API_KEY)
 
-@st.cache_data(ttl=90)
-def get_gemini_decision(symbol, interval, trading_mode, signal, formula_decision, score_total,
-                        rsi, macd_val, ema20, ema50, current_price,
-                        supports_str, resistances_str, mtf_score, GEMINI_API_KEY):
-    fallback = {"insights":[],"kesimpulan":"","ai_decision":formula_decision,"ai_reason":"","is_override":False}
-    if not GEMINI_API_KEY:
-        return fallback
-    try:
-        if trading_mode == "Scalping":
-            override_rule = """ATURAN OVERRIDE (Scalping — Agresif, frekuensi tinggi):
-- User butuh profit $5/hari dari trade kecil yang sering → jangan terlalu ketat
-- WAIT → boleh override ENTER kalau ada 1+ konfirmasi: momentum kuat ATAU harga di zona S/R ATAU volume surge
-- SKIP (score 44-47) → boleh override ke WAIT kalau ada peluang terlihat
-- SKIP (score <44) → WAJIB tetap SKIP"""
-        elif trading_mode == "Intraday":
-            override_rule = """ATURAN OVERRIDE (Intraday — Balance frekuensi & kualitas):
-- WAIT → boleh override ENTER kalau ada 2+ konfirmasi: trend searah + momentum ok + tidak jauh dari S/R
-- SKIP (score 46-49) → boleh override ke WAIT kalau setup terlihat membaik
-- SKIP (score <46) → WAJIB tetap SKIP, jangan override ke ENTER langsung"""
+# ─────────────────────────────────────────────
+#  FORMULA FALLBACK ENGINE
+#  Aktif kalau Gemini limit/di-toggle off
+#  XAUUSD: TP +1.5/+2.5, SL -16 (terbukti dari demo trading)
+# ─────────────────────────────────────────────
+def formula_signal_engine(df, symbol, bid, digits):
+    if df is None or len(df) < 50:
+        return None
+    close = df["close"]
+    rsi   = ta.momentum.RSIIndicator(close, window=14).rsi().iloc[-1]
+    macd_i= ta.trend.MACD(close)
+    mv    = macd_i.macd().iloc[-1]
+    ms    = macd_i.macd_signal().iloc[-1]
+    ema20 = ta.trend.EMAIndicator(close, window=20).ema_indicator().iloc[-1]
+    ema50 = ta.trend.EMAIndicator(close, window=50).ema_indicator().iloc[-1]
+    atr   = ta.volatility.AverageTrueRange(df["high"], df["low"], close, window=14).average_true_range().iloc[-1]
+    is_xau = "XAU" in symbol or "GOL" in symbol
+    is_jpy = "JPY" in symbol
+    bull = sum([bid > ema20, bid > ema50, mv > ms, rsi < 60])
+    bear = sum([bid < ema20, bid < ema50, mv < ms, rsi > 40])
+    if bull >= 3:
+        action = "BUY"
+        entry  = round(bid, digits)
+        if is_xau:
+            tp1,tp2,sl = round(entry+1.5,digits),round(entry+2.5,digits),round(entry-16.0,digits)
+        elif is_jpy:
+            tp1,tp2,sl = round(entry+(atr*0.8),digits),round(entry+(atr*1.3),digits),round(entry-(atr*1.5),digits)
         else:
-            override_rule = """ATURAN OVERRIDE (Swing — Selektif, RR besar):
-- WAIT → boleh override ENTER hanya kalau SEMUA konfirmasi: trend kuat + MTF searah + di S/R + RR>1.2
-- SKIP → jangan override, tunggu setup sempurna"""
+            tp1,tp2,sl = round(entry+(atr*0.8),digits),round(entry+(atr*1.3),digits),round(entry-(atr*1.5),digits)
+    elif bear >= 3:
+        action = "SELL"
+        entry  = round(bid, digits)
+        if is_xau:
+            tp1,tp2,sl = round(entry-1.5,digits),round(entry-2.5,digits),round(entry+16.0,digits)
+        elif is_jpy:
+            tp1,tp2,sl = round(entry-(atr*0.8),digits),round(entry-(atr*1.3),digits),round(entry+(atr*1.5),digits)
+        else:
+            tp1,tp2,sl = round(entry-(atr*0.8),digits),round(entry-(atr*1.3),digits),round(entry+(atr*1.5),digits)
+    else:
+        return {"action":"HOLD","entry":bid,"tp1":0,"tp2":0,"sl":0,
+                "confidence":40,"reason":"Market sideways — tidak ada setup jelas.",
+                "insights":[],"ai_active":True,"source":"formula","market_reco":""}
+    rsi_note = f"RSI {rsi:.0f} {'oversold' if rsi<35 else 'overbought' if rsi>65 else 'neutral'}"
+    return {
+        "action":action,"entry":entry,"tp1":tp1,"tp2":tp2,"sl":sl,
+        "confidence":min(int((max(bull,bear)/4)*80+20),85),
+        "reason":f"{'Bullish' if action=='BUY' else 'Bearish'} — EMA+MACD+{rsi_note} konfirmasi.",
+        "insights":[
+            f"EMA20={ema20:.{digits}f} EMA50={ema50:.{digits}f} — price {'above' if bid>ema50 else 'below'} EMA50",
+            f"MACD {'bullish' if mv>ms else 'bearish'} cross, RSI={rsi:.1f}, ATR={atr:.{digits}f}",
+            f"Level {'XAUUSD scalping (TP kecil realistis)' if is_xau else 'ATR-based forex'}",
+        ],
+        "ai_active":True,"source":"formula","market_reco":"",
+    }
 
-        prompt = f"""
-Kamu adalah Decision Engine AI untuk sistem trading Forex MT5 hybrid.
-Rumus matematika sudah menghasilkan data presisi, tugasmu adalah interpretasi kontekstual.
+@st.cache_data(ttl=60)
+def get_gemini_full_analysis(symbol, interval, trading_mode,
+                              ohlcv_summary, rsi, macd_val, macd_sig,
+                              ema20, ema50, ema200,
+                              bb_pos, vol_ratio, atr,
+                              current_price, bid, ask, spread,
+                              supports_str, resistances_str,
+                              mtf_score, formula_signal, formula_score,
+                              GEMINI_API_KEY):
+    """
+    GEMINI SEBAGAI OTAK UTAMA.
+    Dikasih semua data mentah — dia yang mutusin segalanya.
+    Formula hanya safety net: block kalau market chaos ekstrem.
+    Return: action, entry, tp1, tp2, sl, reason, insights, market_reco, confidence
+    """
+    empty = {
+        "action": "HOLD", "entry": current_price,
+        "tp1": 0, "tp2": 0, "sl": 0,
+        "reason": "Gemini tidak aktif", "insights": [],
+        "market_reco": "", "confidence": 0,
+        "ai_active": False
+    }
+    if not GEMINI_API_KEY:
+        return empty
 
-DATA TEKNIKAL:
-- Symbol: {symbol} (Forex) | TF: {interval} | Mode: {trading_mode}
-- Signal: {signal} | Keputusan Rumus: {formula_decision} | Score: {score_total}/100
-- RSI: {rsi} | MACD: {macd_val} | EMA20: {ema20} | EMA50: {ema50}
-- Harga: {current_price} | Support: {supports_str} | Resistance: {resistances_str}
-- MTF Score: {mtf_score}/15
-- BUY = LONG, SELL = SHORT (keduanya valid di Forex)
+    # Safety net minimal — block hanya kalau kondisi benar-benar chaos
+    try:
+        if atr > current_price * 0.015:  # ATR > 1.5% dari harga = chaos ekstrem
+            empty["reason"] = "Market terlalu volatile saat ini, tunggu sebentar"
+            return empty
+    except:
+        pass
 
-TARGET: Profit $5+/hari. Mode {trading_mode}:
-- Scalping: sering entry, TP kecil konsisten, lebih longgar
-- Intraday: balance kualitas & frekuensi
-- Swing: jarang entry, setup harus matang
-Prinsip: setup 70% bagus + TP kecil > nunggu setup sempurna yang tidak datang.
+    if trading_mode == "Aggressive":
+        mode_instruction = """MODE: AGGRESSIVE SCALPING
+- Prioritas UTAMA: frekuensi entry tinggi, profit kecil tapi sering
+- Target per trade: $5-$25 profit
+- Jangan terlalu selektif — kalau ada momentum minimal, langsung rekomendasikan BUY atau SELL
+- SL ketat tapi realistis (tidak terlalu sempit kena noise)
+- Kalau tidak ada setup sama sekali, baru kasih HOLD"""
+    elif trading_mode == "Scalping":
+        mode_instruction = """MODE: SCALPING M15
+- Cari peluang entry yang cukup bagus di timeframe M15
+- Target per trade: $10-$30, TP cepat
+- Lebih longgar dari Intraday, tapi tetap ada konfirmasi minimal
+- Kalau momentum ada + arah jelas → rekomendasikan entry"""
+    elif trading_mode == "Intraday":
+        mode_instruction = """MODE: INTRADAY
+- Balance antara kualitas dan frekuensi
+- Target per trade: $20-$50
+- Butuh 2+ konfirmasi sebelum entry
+- Setup harus cukup jelas"""
+    else:
+        mode_instruction = """MODE: SWING
+- Selektif, setup harus matang
+- Target per trade: $50+
+- Tunggu setup yang benar-benar solid"""
 
-{override_rule}
+    prompt = f"""
+Kamu adalah AI Trading Analyst profesional untuk Forex MT5.
+Kamu adalah DECISION MAKER UTAMA — bukan sekadar override tool.
+Analisis semua data berikut dan berikan keputusan trading yang actionable.
 
-Balas HANYA JSON:
-{{"ai_decision":"ENTER/WAIT/SKIP","ai_reason":"1 kalimat","is_override":true/false,"insights":["p1","p2","p3"],"kesimpulan":"ringkasan"}}
+PAIR: {symbol} | TIMEFRAME: {interval}
+HARGA SEKARANG: Bid={bid} | Ask={ask} | Spread={spread:.1f} pts
+
+INDIKATOR TEKNIKAL:
+- RSI(14): {rsi:.1f} {"→ OVERSOLD, potensi bounce" if rsi < 30 else "→ OVERBOUGHT, potensi reversal" if rsi > 70 else "→ Neutral"}
+- MACD: {macd_val:.5f} vs Signal {macd_sig:.5f} {"→ BULLISH CROSS" if macd_val > macd_sig else "→ BEARISH CROSS"}
+- EMA20: {ema20:.5f} | EMA50: {ema50:.5f} | EMA200: {ema200:.5f}
+- Posisi harga vs EMA: {"ABOVE EMA20/50 → bullish bias" if current_price > ema20 and current_price > ema50 else "BELOW EMA20/50 → bearish bias" if current_price < ema20 and current_price < ema50 else "MIXED → sideways"}
+- Bollinger Band position: {bb_pos:.1f}% {"→ dekat lower band, potensi bounce" if bb_pos < 20 else "→ dekat upper band, potensi reversal" if bb_pos > 80 else "→ mid band"}
+- Volume ratio vs avg: {vol_ratio:.2f}x {"→ VOLUME SURGE ⚡" if vol_ratio > 1.5 else "→ Normal"}
+- ATR(14): {atr:.5f}
+
+STRUKTUR HARGA:
+- Support: {supports_str}
+- Resistance: {resistances_str}
+- MTF Alignment Score: {mtf_score}/15 {"→ ALIGNED" if mtf_score >= 9 else "→ MIXED" if mtf_score >= 5 else "→ AGAINST"}
+
+CANDLESTICK TERBARU (5 candle terakhir):
+{ohlcv_summary}
+
+FORMULA PRE-SCREENING: Signal={formula_signal} | Score={formula_score}/100
+(Ini HANYA referensi awal — keputusan final ada di tangan kamu)
+
+{mode_instruction}
+
+CONTEXT PENTING untuk {symbol}:
+- Gold (XAUUSD): volatile, spread besar, butuh SL minimal 150-200 pips dari entry
+- EUR/GBP pairs: lebih smooth, SL 20-50 pips cukup
+- JPY pairs: harga dalam ratusan, pip value berbeda
+- Perhatikan spread saat ini sebelum kasih entry price
+
+TUGASMU:
+1. Analisis momentum saat ini — apakah ada peluang?
+2. Kalau ADA peluang (meski tidak sempurna) → rekomendasikan BUY atau SELL
+3. Kalau benar-benar tidak ada setup → HOLD saja
+4. Kasih level entry yang realistis (dekat harga ask untuk BUY, bid untuk SELL)
+5. TP1 = target konservatif, TP2 = target optimis
+6. SL = proteksi dari noise, tapi tidak terlalu sempit
+
+WAJIB BALAS HANYA FORMAT JSON INI:
+{{
+    "action": "BUY" atau "SELL" atau "HOLD",
+    "confidence": 0-100,
+    "entry": angka_harga_entry,
+    "tp1": angka_harga_tp1,
+    "tp2": angka_harga_tp2,
+    "sl": angka_harga_sl,
+    "reason": "alasan singkat kenapa BUY/SELL/HOLD (1-2 kalimat, bahasa Indonesia santai)",
+    "insights": [
+        "analisis momentum",
+        "analisis struktur harga",
+        "analisis risiko"
+    ],
+    "market_reco": "kalau pair ini tidak menarik saat ini, rekomendasikan pair lain yang lebih hot (atau kosongkan string kalau pair ini oke)"
+}}
 """
-        model    = genai.GenerativeModel("gemini-3.1-flash-lite")
-        response = model.generate_content(prompt, generation_config={"response_mime_type":"application/json"})
-        data     = json.loads(response.text.strip())
-
-        floor_map = {"Scalping":44,"Intraday":46,"Swing":52}
-        min_floor = floor_map.get(trading_mode, 46)
-        if formula_decision == "SKIP" and score_total < min_floor:
-            data["ai_decision"] = "SKIP"
-            data["is_override"] = False
-            data["ai_reason"]   = f"Score {score_total} di bawah floor {min_floor} — tetap SKIP."
-        if signal == "HOLD":
-            data["ai_decision"] = "SKIP"
-            data["is_override"] = False
-
+    try:
+        response = gemini_client.models.generate_content(
+            model=GEMINI_MODEL,
+            contents=prompt,
+            config={"response_mime_type": "application/json"}
+        )
+        data = json.loads(response.text.strip())
         return {
-            "insights":    data.get("insights",[]),
-            "kesimpulan":  data.get("kesimpulan",""),
-            "ai_decision": data.get("ai_decision", formula_decision),
-            "ai_reason":   data.get("ai_reason",""),
-            "is_override": data.get("is_override", False),
+            "action":       data.get("action", "HOLD"),
+            "confidence":   int(data.get("confidence", 0)),
+            "entry":        float(data.get("entry", current_price)),
+            "tp1":          float(data.get("tp1", 0)),
+            "tp2":          float(data.get("tp2", 0)),
+            "sl":           float(data.get("sl", 0)),
+            "reason":       data.get("reason", ""),
+            "insights":     data.get("insights", []),
+            "market_reco":  data.get("market_reco", ""),
+            "ai_active":    True
         }
     except Exception as e:
-        fallback["insights"] = [f"Gemini tidak tersedia: {str(e)}"]
-        return fallback
+        empty["reason"] = f"Gemini error: {str(e)}"
+        return empty
 
-@st.cache_resource
 def init_mt5():
-    if not mt5.initialize():
-        return False
-    return True
+    with mt5_lock:
+        if not mt5.initialize():
+            return False, mt5.last_error()
+        return True, None
+
+# Panggil TANPA cache_resource, atau kasih retry logic
+if "mt5_connected" not in st.session_state:
+    ok, err = init_mt5()
+    st.session_state.mt5_connected = ok
+    if not ok:
+        st.error(f"Gagal konek MT5: {err}")
+        if st.button("🔄 Retry Koneksi"):
+            st.session_state.mt5_connected = False
+            st.rerun()
+        st.stop()
 
 # ─────────────────────────────────────────────
 #  DATA FUNCTIONS
@@ -188,10 +338,13 @@ TIMEFRAME_MAP = {
 
 @st.cache_data(ttl=30)
 def get_mt5_price(symbol):
+    # Resolve ticker name dari map
+    actual_symbol = TICKER_MAP.get(symbol, symbol)
     try:
-        mt5.symbol_select(symbol, True)
-        tick = mt5.symbol_info_tick(symbol)
-        info = mt5.symbol_info(symbol)
+        with mt5_lock:
+            mt5.symbol_select(actual_symbol, True)
+            tick = mt5.symbol_info_tick(actual_symbol)
+            info = mt5.symbol_info(actual_symbol)
         if tick is None or info is None:
             return None
         if tick.bid == 0.0 and tick.ask == 0.0:
@@ -205,31 +358,62 @@ def get_mt5_price(symbol):
     except:
         return None
 
-@st.cache_data(ttl=60)
+@st.cache_data(ttl=15)
 def get_mt5_klines(symbol, timeframe_str, limit):
+    # Resolve ticker name dari map
+    actual_symbol = TICKER_MAP.get(symbol, symbol)
     try:
-        mt5.symbol_select(symbol, True)
+        with mt5_lock:
+            selected = mt5.symbol_select(actual_symbol, True)
+            if not selected:
+                err = mt5.last_error()
+        if not selected:
+            st.session_state["_last_chart_error"] = f"symbol_select gagal: {err}"
+            return None
         tf = TIMEFRAME_MAP.get(timeframe_str, mt5.TIMEFRAME_H1)
-        rates = mt5.copy_rates_from_pos(symbol, tf, 0, limit)
-        if rates is None:
+        
+        with mt5_lock:
+            rates = mt5.copy_rates_from_pos(actual_symbol, tf, 0, limit)
+            
+        # History sync retry jika server broker belum sempat mendownload data
+        retry_delays = [1, 2, 3]
+        for delay in retry_delays:
+            if rates is not None and len(rates) > 0:
+                break
+            time.sleep(delay)
+            with mt5_lock:
+                rates = mt5.copy_rates_from_pos(actual_symbol, tf, 0, limit)
+                
+        if rates is None or len(rates) == 0:
+            with mt5_lock:
+                err = mt5.last_error()
+            st.session_state["_last_chart_error"] = f"copy_rates_from_pos kosong: {err}"
             return None
         df = pd.DataFrame(rates)
         df["time"] = pd.to_datetime(df["time"], unit="s")
         df = df.rename(columns={"time": "timestamp", "tick_volume": "volume"})
         for col in ["open", "high", "low", "close", "volume"]:
             df[col] = df[col].astype(float)
+        st.session_state["_last_chart_error"] = None
         return df
-    except:
+    except Exception as e:
+        st.session_state["_last_chart_error"] = f"Exception: {e}"
         return None
 
 @st.cache_data(ttl=60)
 def get_all_prices(pairs):
     result = []
     for symbol in pairs:
-        tick = mt5.symbol_info_tick(symbol)
-        info = mt5.symbol_info(symbol)
+        # Tambahkan pemetaan di sini
+        actual_symbol = TICKER_MAP.get(symbol, symbol)
+
+        with mt5_lock:
+            # Gunakan actual_symbol untuk fungsi MT5
+            tick = mt5.symbol_info_tick(actual_symbol)
+            info = mt5.symbol_info(actual_symbol)
+            rates = mt5.copy_rates_from_pos(actual_symbol, mt5.TIMEFRAME_D1, 0, 2)
+            
         if tick and info:
-            rates = mt5.copy_rates_from_pos(symbol, mt5.TIMEFRAME_D1, 0, 2)
             if rates is not None and len(rates) >= 2:
                 prev_close = rates[-2]["close"]
                 curr_price = tick.bid
@@ -255,9 +439,9 @@ def calculate_signal(df, mtf_score_override=None):
     Returns:
         signal       : "BUY" | "SELL" | "HOLD"
         reason       : string deskripsi
-        signals      : dict badge indikator (kompatibel UI lama)
+        signals      : dict badge indikator
         indicators   : dict nilai mentah indikator
-        confidence   : int 0-100 (pengganti strength)
+        confidence   : int 0-100 (kekuatan bias searah)
         score_detail : dict breakdown per kategori
     """
     if df is None or len(df) < 50:
@@ -438,6 +622,7 @@ def calculate_signal(df, mtf_score_override=None):
     # ── TOTAL ──────────────────────────────────
     total_score = trend_score + momentum_score + structure_score + mtf_score + volume_score
     weighted_bias = (trend_bias * 35) + (momentum_bias * 25) + (structure_bias * 20)
+    
     # ── SIGNAL DECISION ────────────────────────
     if weighted_bias > 0 and total_score >= 60:
         signal = "BUY"
@@ -450,8 +635,6 @@ def calculate_signal(df, mtf_score_override=None):
     else:
         signal = "HOLD"
 
-    # Score mentah memakai skala bullish (tinggi = BUY, rendah = SELL).
-    # Ubah menjadi kekuatan searah bias agar BUY dan SELL dinilai simetris.
     if signal == "BUY":
         confidence = total_score
     elif signal == "SELL":
@@ -601,9 +784,6 @@ def calculate_trade_decision(signal, score_detail, df, supports, resistances, tr
     return "ENTER", f"Score {total}/100, RR 1:{rr_ratio:.1f}", "#3fb950"
 
 # ─────────────────────────────────────────────
-#  MULTI TIMEFRAME
-# ─────────────────────────────────────────────
-# ─────────────────────────────────────────────
 #  REAL MTF SCORE ENGINE
 #  Fetch 1H / 4H / 1D → score per TF → total 0-15
 #  Bobot: 1D=7, 4H=5, 1H=3
@@ -659,7 +839,6 @@ def calculate_mtf_score(symbol, current_tf, trading_mode="Ketat"):
     normalized = (total_score / total_weight) * 15
     return round(normalized)
 
-
 def multi_timeframe_analysis(symbol):
     timeframes = [("1H", "1h", 100), ("4H", "4h", 100), ("1D", "1d", 200)]
     results = []
@@ -696,7 +875,7 @@ def generate_trading_plan(df, current_price, signal, supports, resistances, moda
     if df is None or len(df) < 20 or signal == "HOLD":
         return None
 
-    atr   = ta.volatility.AverageTrueRange(df["high"], df["low"], df["close"], window=14).average_true_range().iloc[-1]
+    atr = ta.volatility.AverageTrueRange(df["high"], df["low"], df["close"], window=14).average_true_range().iloc[-1]
     entry = round(current_price, 5)
 
     if trading_mode == "Scalping":
@@ -753,9 +932,6 @@ def generate_trading_plan(df, current_price, signal, supports, resistances, moda
     tp3_pct = abs((tp3 - entry) / entry * 100)
     rr_ratio = round(tp1_pct / sl_pct, 2) if sl_pct > 0 else 0
 
-    # Auto-detect pip size & lot size berdasarkan harga
-    # Forex (< 100): pip = 0.00010, lot dari 100k unit
-    # Gold/Indices (>= 100): pip = 0.10, lot dari 10 unit
     if entry >= 100:
         pip_size = 0.10
         lot_size = round(modal_usd / (entry * 10), 4)
@@ -825,7 +1001,6 @@ def generate_ai_reasoning(signal, decision, decision_reason, score_detail, indic
 
     def cat_pct(score, max_score):
         raw_pct = (score / max_score * 100) if max_score else 0
-        # Score tinggi = bullish, score rendah = bearish (sesuai desain Signal Engine v2)
         return raw_pct if is_buy else (100 - raw_pct)
 
     trend_pct     = cat_pct(score_detail["trend"],     score_detail["trend_max"])
@@ -930,21 +1105,26 @@ def build_chart(df, symbol, resistances=[], supports=[]):
 # ─────────────────────────────────────────────
 #  SESSION STATE
 # ─────────────────────────────────────────────
-if "auto_refresh_mt5" not in st.session_state:
-    st.session_state["auto_refresh_mt5"] = False
+if "auto_refresh_mt5"   not in st.session_state:
+    st.session_state["auto_refresh_mt5"]   = False
+if "use_gemini_mt5"     not in st.session_state:
+    st.session_state["use_gemini_mt5"]     = True
+if "gemini_result_mt5"  not in st.session_state:
+    st.session_state["gemini_result_mt5"]  = None
 
 # ─────────────────────────────────────────────
 #  MT5 INIT CHECK
 # ─────────────────────────────────────────────
-connected = init_mt5()
+# Memperbaiki logical tuple check: unpacking connected dan conn_err
+connected, conn_err = init_mt5()
 if not connected:
-    st.error("❌ Gagal konek ke MT5! Pastiin MetaTrader 5 sedang running di VPS.")
+    st.error(f"❌ Gagal konek ke MT5! Error: {conn_err}")
     st.stop()
 
 # ─────────────────────────────────────────────
 #  MAIN CONTENT
 # ─────────────────────────────────────────────
-DEFAULT_PAIRS = ["EURUSD", "GBPUSD", "USDJPY", "USDCHF", "AUDUSD", "XAUUSD"]
+DEFAULT_PAIRS = ["EURUSD", "GBPUSD", "USDJPY", "USDCHF", "AUDUSD", "GOLD"]
 
 col_sel1, col_sel2 = st.columns([2, 1])
 with col_sel1:
@@ -1020,6 +1200,26 @@ with tab1:
 
     st.markdown("---")
 
+    # ── Toggle Gemini + Manual Refresh ──
+    col_tog, col_btn = st.columns([1, 2])
+    with col_tog:
+        use_gemini = st.checkbox(
+            "✨ Pakai Gemini AI",
+            value=st.session_state["use_gemini_mt5"] and GEMINI_ENABLED,
+            disabled=not GEMINI_ENABLED,
+            key="gemini_toggle_mt5",
+            help="Uncheck = pakai Formula Engine, hemat RPD Gemini"
+        )
+        st.session_state["use_gemini_mt5"] = use_gemini
+        if not GEMINI_ENABLED:
+            st.caption("🔴 Gemini key tidak ada")
+        elif use_gemini:
+            st.caption("🟢 Gemini aktif")
+        else:
+            st.caption("📐 Formula aktif")
+    with col_btn:
+        do_refresh = st.button("🔄 Refresh Analisis", use_container_width=True, key="refresh_btn_mt5")
+
     col_chart, col_signal = st.columns([3, 1])
 
     with col_chart:
@@ -1028,132 +1228,216 @@ with tab1:
             fig = build_chart(df, symbol, resistances, supports)
             st.plotly_chart(fig, use_container_width=True)
         else:
-            st.error("Gagal load chart data")
+            err_detail = st.session_state.get("_last_chart_error", "unknown")
+            st.error(f"Gagal load chart data — {err_detail}")
 
-        # Filled after signal calculation, but rendered directly below the chart.
+        # Placeholder container for layout balance
         trading_plan_container = st.container()
 
     with col_signal:
-        st.markdown('<p class="section-header">AI Signal</p>', unsafe_allow_html=True)
+        st.markdown('<p class="section-header">🤖 AI Signal</p>', unsafe_allow_html=True)
         if df is not None:
-            # Map interval_val ke label TF untuk exclude dari MTF scoring
-            tf_label_map = {"1m":"1M","5m":"5M","15m":"15M","1h":"1H","4h":"4H","1d":"1D"}
+            tf_label_map     = {"1m":"1M","5m":"5M","15m":"15M","1h":"1H","4h":"4H","1d":"1D"}
             current_tf_label = tf_label_map.get(interval_val, "1H")
+            mtf_real         = calculate_mtf_score(symbol, current_tf_label, trading_mode)
 
-            # Hitung MTF score real dari TF lain (1H/4H/1D)
-            mtf_real = calculate_mtf_score(symbol, current_tf_label, trading_mode)
-
+            # Formula tetap jalan sebagai referensi & safety net
             signal, reason, signals, indicators, confidence, score_detail = calculate_signal(df, mtf_score_override=mtf_real)
             formula_decision, formula_reason, formula_color = calculate_trade_decision(
                 signal, score_detail, df, supports, resistances, trading_mode
             )
 
-            # ── Gemini Decision Override ──
-            gemini_result = None
-            if GEMINI_ENABLED:
-                gemini_result = get_gemini_decision(
-                    symbol=symbol, interval=interval_val, trading_mode=trading_mode,
-                    signal=signal, formula_decision=formula_decision,
-                    score_total=score_detail["total"],
-                    rsi=indicators.get("RSI",0), macd_val=indicators.get("MACD",0),
-                    ema20=indicators.get("EMA20",0), ema50=indicators.get("EMA50",0),
-                    current_price=bid,
-                    supports_str=str(supports), resistances_str=str(resistances),
-                    mtf_score=mtf_real, GEMINI_API_KEY=GEMINI_API_KEY,
-                )
+            # Hitung indikator tambahan untuk Gemini
+            close = df["close"]
+            _rsi     = indicators.get("RSI", 0)
+            _macd    = indicators.get("MACD", 0)
+            _macd_s  = ta.trend.MACD(close).macd_signal().iloc[-1]
+            _ema20   = indicators.get("EMA20", 0)
+            _ema50   = indicators.get("EMA50", 0)
+            _ema200  = indicators.get("EMA200", bid)
+            _bb      = ta.volatility.BollingerBands(close, window=20)
+            _bb_pos  = ((bid - _bb.bollinger_lband().iloc[-1]) / max(_bb.bollinger_hband().iloc[-1] - _bb.bollinger_lband().iloc[-1], 0.0001)) * 100
+            _atr     = ta.volatility.AverageTrueRange(df["high"], df["low"], close, window=14).average_true_range().iloc[-1]
+            _vol_avg = df["volume"].rolling(20).mean().iloc[-1]
+            _vol_r   = df["volume"].iloc[-1] / max(_vol_avg, 0.0001)
+            _spread  = (ask - bid) / (0.0001 if bid < 10 else 0.01 if bid < 1000 else 1.0)
 
-            if gemini_result and gemini_result["ai_decision"]:
-                decision        = gemini_result["ai_decision"]
-                is_override     = gemini_result["is_override"]
-                override_reason = gemini_result["ai_reason"]
-                decision_reason = f"🤖 AI Override: {override_reason}" if is_override else (formula_reason if not override_reason else override_reason)
-                decision_color  = "#d2a8ff" if is_override else formula_color
+            # OHLCV 5 candle terakhir untuk konteks
+            _ohlcv = chr(10).join([
+                f"  [{i}] O={row.open:.5f} H={row.high:.5f} L={row.low:.5f} C={row.close:.5f}"
+                for i, row in enumerate(df.tail(5).itertuples())
+            ])
+
+            # ── GEMINI / FORMULA ENGINE — tergantung toggle + do_refresh ──
+            gemini_data = None
+
+            # Jalankan analisis: kalau refresh diklik ATAU belum ada hasil sebelumnya
+            _run_analysis = do_refresh or st.session_state["gemini_result_mt5"] is None
+
+            if _run_analysis:
+                if use_gemini and GEMINI_ENABLED:
+                    # Panggil Gemini
+                    gemini_data = get_gemini_full_analysis(
+                        symbol=symbol, interval=interval_val, trading_mode=trading_mode,
+                        ohlcv_summary=_ohlcv,
+                        rsi=_rsi, macd_val=_macd, macd_sig=_macd_s,
+                        ema20=_ema20, ema50=_ema50, ema200=_ema200,
+                        bb_pos=_bb_pos, vol_ratio=_vol_r, atr=_atr,
+                        current_price=bid, bid=bid, ask=ask, spread=_spread,
+                        supports_str=str(supports), resistances_str=str(resistances),
+                        mtf_score=mtf_real,
+                        formula_signal=signal, formula_score=score_detail["total"],
+                        GEMINI_API_KEY=GEMINI_API_KEY,
+                    )
+                    if gemini_data is None or not gemini_data.get("ai_active"):
+                        # Gemini error/limit → fallback formula
+                        st.warning("⚠️ Gemini tidak merespons / kena limit — Formula Engine aktif.")
+                        gemini_data = formula_signal_engine(df, symbol, bid, digits)
+                else:
+                    # Toggle off / Gemini tidak aktif → langsung formula
+                    gemini_data = formula_signal_engine(df, symbol, bid, digits)
+
+                # Simpan hasil ke session state
+                if gemini_data:
+                    gemini_data["_ts"] = datetime.now().strftime("%H:%M:%S")
+                    st.session_state["gemini_result_mt5"] = gemini_data
             else:
-                decision, decision_reason, decision_color = formula_decision, formula_reason, formula_color
-                is_override = False
+                # Pakai hasil sebelumnya (tidak perlu Gemini lagi)
+                gemini_data = st.session_state["gemini_result_mt5"]
 
-            signal_class   = f"signal-{signal.lower()}"
-            signal_emoji   = "🟢" if signal=="BUY" else "🔴" if signal=="SELL" else "🔵"
-            strength_color = "#3fb950" if signal=="BUY" else "#f85149" if signal=="SELL" else "#388bfd"
-            decision_emoji = "🟢" if decision=="ENTER" else "🟡" if decision=="WAIT" else "🔴"
-            decision_bg    = "rgba(63,185,80,0.12)" if decision=="ENTER" else "rgba(240,136,62,0.12)" if decision=="WAIT" else "rgba(248,81,73,0.08)"
-            override_badge = '<span style="font-size:10px;background:#2d1f3d;color:#d2a8ff;border:1px solid #6e40c9;border-radius:4px;padding:2px 6px;margin-left:6px;">✨ AI</span>' if is_override else ""
+            # Tentukan tampilan berdasarkan hasil
+            if gemini_data and gemini_data.get("ai_active"):
+                ai_action    = gemini_data["action"]
+                ai_conf      = gemini_data["confidence"]
+                ai_reason    = gemini_data["reason"]
+                ai_insights  = gemini_data["insights"]
+                ai_reco      = gemini_data.get("market_reco", "")
+                ai_entry     = gemini_data["entry"]
+                ai_tp1       = gemini_data["tp1"]
+                ai_tp2       = gemini_data["tp2"]
+                ai_sl        = gemini_data["sl"]
+                action_color = "#3fb950" if ai_action=="BUY" else "#f85149" if ai_action=="SELL" else "#388bfd"
+                action_emoji = "🟢" if ai_action=="BUY" else "🔴" if ai_action=="SELL" else "🔵"
+                action_bg    = "rgba(63,185,80,0.12)" if ai_action=="BUY" else "rgba(248,81,73,0.12)" if ai_action=="SELL" else "rgba(56,139,253,0.08)"
+                conf_bar_color = "#3fb950" if ai_conf >= 70 else "#f0883e" if ai_conf >= 50 else "#f85149"
 
-            st.markdown(f"""
-            <div class="{signal_class}">
-                <p class="signal-text">{signal_emoji} {signal}</p>
-                <p class="signal-reason">{reason}</p>
-                <div class="strength-bar-container">
-                    <div class="strength-bar-fill" style="width:{confidence}%; background:{strength_color};"></div>
+                st.markdown(f"""
+                <div style="background:{action_bg}; border:1px solid {action_color};
+                     border-left:5px solid {action_color}; border-radius:10px; padding:20px; text-align:center;">
+                    <p style="color:#8b949e; font-size:10px; text-transform:uppercase; letter-spacing:2px; margin:0;">🤖 Gemini AI Decision</p>
+                    <p style="font-size:36px; font-weight:900; color:{action_color}; margin:8px 0; letter-spacing:3px;">{action_emoji} {ai_action}</p>
+                    <p style="color:#c9d1d9; font-size:13px; margin:0 0 12px 0;">{ai_reason}</p>
+                    <div class="strength-bar-container">
+                        <div class="strength-bar-fill" style="width:{ai_conf}%; background:{conf_bar_color};"></div>
+                    </div>
+                    <p style="color:#8b949e; font-size:11px; margin:4px 0 0 0;">AI Confidence: {ai_conf}%</p>
                 </div>
-                <p style="color:#8b949e; font-size:11px;">Formula Score: {score_detail["total"]}/100 | Confidence: {confidence}%</p>
-                <div style="margin-top:14px;background:{decision_bg};border:1px solid {decision_color};border-radius:6px;padding:10px 12px;text-align:center;">
-                    <p style="font-size:18px;font-weight:900;color:{decision_color};margin:0;letter-spacing:3px;">
-                        {decision_emoji} {decision}{override_badge}
-                    </p>
-                    <p style="color:#8b949e;font-size:11px;margin:4px 0 0 0;">{decision_reason}</p>
-                </div>
-            </div>
-            """, unsafe_allow_html=True)
+                """, unsafe_allow_html=True)
 
-            # Filled later, but rendered here so the explanation stays directly
-            # below the signal card and before the score breakdown.
+                # Market reco jika ada
+                if ai_reco:
+                    st.markdown(f"""
+                    <div style="background:#1b1f2d; border:1px solid #388bfd; border-radius:8px;
+                         padding:10px 14px; margin-top:10px;">
+                        <p style="color:#388bfd; font-size:12px; margin:0;">
+                        💡 <strong>Rekomendasi AI:</strong> {ai_reco}
+                        </p>
+                    </div>
+                    """, unsafe_allow_html=True)
+
+                # Entry/TP/SL dari Gemini langsung
+                if ai_action != "HOLD":
+                    st.markdown("<br>", unsafe_allow_html=True)
+                    st.markdown('<p class="section-header">🎯 Level dari Gemini AI</p>', unsafe_allow_html=True)
+                    tp_color  = "#3fb950" if ai_action == "BUY" else "#f85149"
+                    sl_color  = "#f85149" if ai_action == "BUY" else "#3fb950"
+                    st.markdown(f"""
+                    <div class="tp-card">
+                        <div class="tp-row"><span class="tp-label">Entry</span><span class="tp-value tp-yellow">{ai_entry:.5f}</span></div>
+                        <div class="tp-row"><span class="tp-label">TP 1</span><span class="tp-value" style="color:{tp_color};">{ai_tp1:.5f}</span></div>
+                        <div class="tp-row"><span class="tp-label">TP 2</span><span class="tp-value" style="color:{tp_color};">{ai_tp2:.5f}</span></div>
+                        <div class="tp-row"><span class="tp-label">Stop Loss</span><span class="tp-value" style="color:{sl_color};">{ai_sl:.5f}</span></div>
+                        <div class="tp-row"><span class="tp-label">Formula Ref</span><span class="tp-value" style="color:#8b949e; font-size:11px;">{signal} | Score {score_detail["total"]}/100</span></div>
+                    </div>
+                    """, unsafe_allow_html=True)
+
+            else:
+                # Fallback ke formula kalau Gemini tidak aktif
+                action_color = "#3fb950" if signal=="BUY" else "#f85149" if signal=="SELL" else "#388bfd"
+                sig_class    = f"signal-{signal.lower()}"
+                dec_emoji    = "🟢" if formula_decision=="ENTER" else "🟡" if formula_decision=="WAIT" else "🔴"
+                dec_bg       = "rgba(63,185,80,0.12)" if formula_decision=="ENTER" else "rgba(240,136,62,0.12)" if formula_decision=="WAIT" else "rgba(248,81,73,0.08)"
+                st.markdown(f"""
+                <div class="{sig_class}">
+                    <p class="signal-text">{"🟢" if signal=="BUY" else "🔴" if signal=="SELL" else "🔵"} {signal}</p>
+                    <p class="signal-reason">{reason}</p>
+                    <div class="strength-bar-container">
+                        <div class="strength-bar-fill" style="width:{confidence}%; background:{action_color};"></div>
+                    </div>
+                    <p style="color:#8b949e; font-size:11px;">Score: {score_detail["total"]}/100 | Confidence: {confidence}%</p>
+                    <div style="margin-top:14px;background:{dec_bg};border:1px solid {formula_color};border-radius:6px;padding:10px 12px;text-align:center;">
+                        <p style="font-size:18px;font-weight:900;color:{formula_color};margin:0;">{dec_emoji} {formula_decision}</p>
+                        <p style="color:#8b949e;font-size:11px;margin:4px 0 0 0;">{formula_reason}</p>
+                    </div>
+                </div>
+                <div style="background:#161b22;border:1px solid #30363d;border-radius:8px;padding:10px;margin-top:8px;text-align:center;">
+                    <p style="color:#8b949e;font-size:11px;margin:0;">✨ Tambahkan GEMINI_API_KEY di secrets.toml untuk AI penuh</p>
+                </div>
+                """, unsafe_allow_html=True)
+                # Fallback: pakai formula engine (bukan pesan error)
+                gemini_data = formula_signal_engine(df, symbol, bid, digits)
+                if gemini_data:
+                    gemini_data["_ts"] = datetime.now().strftime("%H:%M:%S")
+                    st.session_state["gemini_result_mt5"] = gemini_data
+                    ai_action = gemini_data["action"]
+                    ai_entry  = gemini_data["entry"]
+                    ai_tp1    = gemini_data["tp1"]
+                    ai_tp2    = gemini_data["tp2"]
+                    ai_sl     = gemini_data["sl"]
+                    conf_bar_color = "#f0883e"
+                    # Re-render dengan formula data
+                    st.rerun()
+                else:
+                    ai_action = "HOLD"
+                    ai_entry = bid
+                    ai_tp1 = ai_tp2 = ai_sl = 0
+
             reasoning_container = st.container()
 
-            # ── Score Breakdown ──────────────────
+            # Score Breakdown (tetap ada sebagai referensi formula)
             st.markdown("<br>", unsafe_allow_html=True)
-            st.markdown('<p class="section-header">Score Breakdown</p>', unsafe_allow_html=True)
-
+            st.markdown('<p class="section-header">📊 Formula Reference</p>', unsafe_allow_html=True)
             score_direction = 1 if signal != "SELL" else -1
             score_rows = [
-                ("Trend",     score_detail["trend"] if score_direction > 0 else score_detail["trend_max"] - score_detail["trend"],             score_detail["trend_max"],     "#388bfd"),
-                ("Momentum",  score_detail["momentum"] if score_direction > 0 else score_detail["momentum_max"] - score_detail["momentum"], score_detail["momentum_max"],  "#d2a8ff"),
-                ("Structure", score_detail["structure"] if score_direction > 0 else score_detail["structure_max"] - score_detail["structure"], score_detail["structure_max"], "#f0883e"),
-                ("MTF",       score_detail["mtf"] if score_direction > 0 else score_detail["mtf_max"] - score_detail["mtf"],                 score_detail["mtf_max"],       "#79c0ff"),
-                ("Volume",    score_detail["volume"],    score_detail["volume_max"],    "#56d364"),
+                ("Trend",     score_detail["trend"] if score_direction>0 else score_detail["trend_max"]-score_detail["trend"],         score_detail["trend_max"],    "#388bfd"),
+                ("Momentum",  score_detail["momentum"] if score_direction>0 else score_detail["momentum_max"]-score_detail["momentum"], score_detail["momentum_max"], "#d2a8ff"),
+                ("Structure", score_detail["structure"] if score_direction>0 else score_detail["structure_max"]-score_detail["structure"], score_detail["structure_max"],"#f0883e"),
+                ("MTF",       score_detail["mtf"] if score_direction>0 else score_detail["mtf_max"]-score_detail["mtf"],               score_detail["mtf_max"],      "#79c0ff"),
+                ("Volume",    score_detail["volume"], score_detail["volume_max"], "#56d364"),
             ]
-            for label_s, val, max_val, bar_color in score_rows:
-                pct = int(val / max_val * 100)
+            for lbl, val, mx, bc in score_rows:
+                pct = int(val/mx*100)
                 st.markdown(f"""
-                <div style="margin-bottom:8px;">
-                    <div style="display:flex; justify-content:space-between; margin-bottom:3px;">
-                        <span style="color:#8b949e; font-size:11px;">{label_s}</span>
-                        <span style="color:#e6edf3; font-size:11px; font-weight:700;">{val}/{max_val}</span>
+                <div style="margin-bottom:6px;">
+                    <div style="display:flex;justify-content:space-between;margin-bottom:2px;">
+                        <span style="color:#8b949e;font-size:11px;">{lbl}</span>
+                        <span style="color:#e6edf3;font-size:11px;font-weight:700;">{val}/{mx}</span>
                     </div>
                     <div class="strength-bar-container">
-                        <div class="strength-bar-fill" style="width:{pct}%; background:{bar_color};"></div>
+                        <div class="strength-bar-fill" style="width:{pct}%;background:{bc};"></div>
                     </div>
                 </div>
                 """, unsafe_allow_html=True)
 
-            st.markdown(f"""
-            <div style="display:flex; justify-content:space-between; padding:6px 0; border-top:1px solid #30363d; margin-top:4px;">
-                <span style="color:#e6edf3; font-size:12px; font-weight:700;">TOTAL</span>
-                <span style="color:{strength_color}; font-size:14px; font-weight:800;">{confidence}/100</span>
-            </div>
-            """, unsafe_allow_html=True)
-
-            st.markdown("<br>", unsafe_allow_html=True)
-            st.markdown('<p class="section-header">Indicators</p>', unsafe_allow_html=True)
-            for ind_name, (ind_val, ind_color) in signals.items():
-                badge_class = f"badge-{'green' if ind_color == 'green' else 'red' if ind_color == 'red' else 'neutral'}"
-                st.markdown(f'<span style="color:#8b949e; font-size:12px;">{ind_name}</span> <span class="badge {badge_class}">{ind_val}</span><br>', unsafe_allow_html=True)
-
-            if indicators:
-                st.markdown("<br>", unsafe_allow_html=True)
-                st.markdown('<p class="section-header">Values</p>', unsafe_allow_html=True)
-                for k, v in indicators.items():
-                    st.markdown(f'<div style="display:flex; justify-content:space-between; padding:4px 0; border-bottom:1px solid #21262d;"><span style="color:#8b949e; font-size:12px;">{k}</span><span style="color:#e6edf3; font-size:12px; font-weight:600;">{v}</span></div>', unsafe_allow_html=True)
-
             st.markdown("<br>", unsafe_allow_html=True)
             st.markdown('<p class="section-header">Support & Resistance</p>', unsafe_allow_html=True)
             for r in resistances:
-                st.markdown(f'<div class="sr-level sr-resistance"><span style="color:#8b949e;">Resistance</span><span style="color:#f85149; font-weight:700;">{r:.5f}</span></div>', unsafe_allow_html=True)
-            st.markdown(f'<div style="text-align:center; padding:4px; color:#e6edf3; font-size:12px; font-weight:700;">── Now: {bid:{fmt}} ──</div>', unsafe_allow_html=True)
+                st.markdown(f'<div class="sr-level sr-resistance"><span style="color:#8b949e;">R</span><span style="color:#f85149;font-weight:700;">{r:.5f}</span></div>', unsafe_allow_html=True)
+            st.markdown(f'<div style="text-align:center;padding:4px;color:#e6edf3;font-size:12px;font-weight:700;">── Now: {bid:{fmt}} ──</div>', unsafe_allow_html=True)
             for s in supports:
-                st.markdown(f'<div class="sr-level sr-support"><span style="color:#8b949e;">Support</span><span style="color:#3fb950; font-weight:700;">{s:.5f}</span></div>', unsafe_allow_html=True)
+                st.markdown(f'<div class="sr-level sr-support"><span style="color:#8b949e;">S</span><span style="color:#3fb950;font-weight:700;">{s:.5f}</span></div>', unsafe_allow_html=True)
 
-    # Trading Plan — rendered in the left column below Price Chart
+    # Trading Plan — Gemini yang kasih level, formula hitung lot/PnL
     with trading_plan_container:
         st.markdown("---")
         st.markdown('<p class="section-header">📋 Trading Plan</p>', unsafe_allow_html=True)
@@ -1163,110 +1447,154 @@ with tab1:
             modal = st.number_input("💵 Modal (USD)", min_value=1.0, value=100.0, step=10.0, format="%.2f")
         with col_m2:
             leverage = st.selectbox("⚡ Leverage", [1, 10, 50, 100, 200, 500], index=3)
-    
-        if df is not None and decision == "ENTER":
-            plan = generate_trading_plan(df, bid, signal, supports, resistances, modal_usd=modal, leverage=leverage, trading_mode=trading_mode)
-    
-            if plan:
-                if trading_mode == "Scalping":   rr_target, rr_marginal = 0.45, 0.35
-                elif trading_mode == "Intraday": rr_target, rr_marginal = 0.8, 0.6
-                else:                            rr_target, rr_marginal = 1.2, 0.9
-                rr_color = "#3fb950" if plan["rr_ratio"] >= rr_target else "#f0883e" if plan["rr_ratio"] >= rr_marginal else "#f85149"
-                action_color = "#3fb950" if plan["signal"] == "BUY" else "#f85149"
-                action_emoji = "🟢" if plan["signal"] == "BUY" else "🔴"
-    
-                col_p1, col_p2, col_p3 = st.columns(3)
-                with col_p1:
-                    st.markdown(f"""
-                    <div class="tp-card">
-                        <p style="color:#8b949e; font-size:11px; text-transform:uppercase; letter-spacing:1px; margin:0 0 12px 0;">Entry & Exit</p>
-                        <div class="tp-row"><span class="tp-label">Action</span><span class="tp-value" style="color:{action_color};">{action_emoji} {plan["signal"]}</span></div>
-                        <div class="tp-row"><span class="tp-label">Entry</span><span class="tp-value tp-yellow">{plan["entry"]:.5f}</span></div>
-                        <div class="tp-row"><span class="tp-label">Stop Loss</span><span class="tp-value tp-red">{plan["sl"]:.5f} ({plan["sl_pips"]} pips)</span></div>
-                        <div class="tp-row"><span class="tp-label">TP 1</span><span class="tp-value tp-green">{plan["tp1"]:.5f} ({plan["tp1_pips"]} pips)</span></div>
-                        <div class="tp-row"><span class="tp-label">TP 2</span><span class="tp-value tp-green">{plan["tp2"]:.5f} ({plan["tp2_pips"]} pips)</span></div>
-                        <div class="tp-row"><span class="tp-label">TP 3</span><span class="tp-value tp-green">{plan["tp3"]:.5f} ({plan["tp3_pips"]} pips)</span></div>
-                    </div>
-                    """, unsafe_allow_html=True)
-                with col_p2:
-                    st.markdown(f"""
-                    <div class="tp-card">
-                        <p style="color:#8b949e; font-size:11px; text-transform:uppercase; letter-spacing:1px; margin:0 0 12px 0;">Risk & Reward</p>
-                        <div class="tp-row"><span class="tp-label">R/R Ratio</span><span class="tp-value" style="color:{rr_color};">1 : {plan["rr_ratio"]}</span></div>
-                        <div class="tp-row"><span class="tp-label">ATR</span><span class="tp-value">{plan["atr"]:.5f}</span></div>
-                        <div class="tp-row"><span class="tp-label">Modal</span><span class="tp-value">${plan["modal"]:,.2f}</span></div>
-                        <div class="tp-row"><span class="tp-label">Lot Size</span><span class="tp-value">{plan["lot_size"]}</span></div>
-                        <div class="tp-row"><span class="tp-label">Leverage</span><span class="tp-value">1:{plan["leverage"]}</span></div>
-                    </div>
-                    """, unsafe_allow_html=True)
-                with col_p3:
-                    st.markdown(f"""
-                    <div class="tp-card">
-                        <p style="color:#8b949e; font-size:11px; text-transform:uppercase; letter-spacing:1px; margin:0 0 12px 0;">Estimasi P&L</p>
-                        <div class="tp-row"><span class="tp-label">Profit TP1</span><span class="tp-value tp-green">+${plan["profit_tp1"]}</span></div>
-                        <div class="tp-row"><span class="tp-label">Profit TP2</span><span class="tp-value tp-green">+${plan["profit_tp2"]}</span></div>
-                        <div class="tp-row"><span class="tp-label">Profit TP3</span><span class="tp-value tp-green">+${plan["profit_tp3"]}</span></div>
-                        <div class="tp-row"><span class="tp-label">Max Loss</span><span class="tp-value tp-red">-${plan["loss_sl"]}</span></div>
-                    <div class="tp-row"><span class="tp-label">Worth it?</span><span class="tp-value" style="color:{rr_color};">{"✅ YES" if plan["rr_ratio"] >= rr_target else "⚠️ MARGINAL" if plan["rr_ratio"] >= rr_marginal else "❌ NO"}</span></div>
-                    </div>
-                    """, unsafe_allow_html=True)
-            else:
-                st.info("⏳ Sinyal HOLD — Tunggu sinyal BUY/SELL yang lebih jelas.")
-        elif df is not None:
-            st.warning(f"Trading Plan dikunci — keputusan AI: {decision}. {decision_reason}")
-    
-    # AI Reasoning + Gemini Display
-    if df is not None:
-        with reasoning_container:
-            reasoning_points, reasoning_conclusion, reasoning_color = generate_ai_reasoning(
-                signal, decision, decision_reason, score_detail, indicators, supports, resistances, trading_mode
-            )
-            st.markdown("---")
-            st.markdown('<p class="section-header">🧠 AI Reasoning</p>', unsafe_allow_html=True)
-            points_html = "".join([f'<li style="color:#c9d1d9;font-size:13px;margin-bottom:6px;line-height:1.6;">{p}</li>' for p in reasoning_points])
+
+        _has_plan = df is not None and gemini_data and gemini_data.get("ai_active") and ai_action in ("BUY","SELL")
+        if _has_plan:
+            # Level dari Gemini atau Formula (sama struktur datanya)
+            _plan_src = gemini_data.get("source","gemini")
+            _plan_lbl = "✨ Level dari Gemini AI" if _plan_src=="gemini" else "📐 Level dari Formula"
+            g_entry = gemini_data["entry"]
+            g_tp1   = gemini_data["tp1"]
+            g_tp2   = gemini_data["tp2"]
+            g_sl    = gemini_data["sl"]
+
+            # Hitung pip size
+            pip_size = 0.01 if "JPY" in symbol else 1.0 if "XAU" in symbol or "GOL" in symbol else 0.0001
+            pip_mult = 100 if "JPY" in symbol else 1.0 if "XAU" in symbol or "GOL" in symbol else 10000
+
+            sl_pips  = round(abs(g_entry - g_sl) * pip_mult, 1)
+            tp1_pips = round(abs(g_tp1 - g_entry) * pip_mult, 1)
+            tp2_pips = round(abs(g_tp2 - g_entry) * pip_mult, 1)
+            rr_ratio = round(tp1_pips / sl_pips, 2) if sl_pips > 0 else 0
+
+            # Hitung lot size & PnL
+            pip_value  = 10.0  # ~$10 per pip per lot standar XAUUSD
+            lot_size   = round(modal / (sl_pips * pip_value * leverage) * leverage, 2) if sl_pips > 0 else 0.01
+            lot_size   = max(0.01, min(lot_size, 10.0))
+            profit_tp1 = round(tp1_pips * pip_value * lot_size, 2)
+            profit_tp2 = round(tp2_pips * pip_value * lot_size, 2)
+            loss_sl    = round(sl_pips  * pip_value * lot_size, 2)
+
+            rr_color     = "#3fb950" if rr_ratio >= 1.0 else "#f0883e" if rr_ratio >= 0.5 else "#f85149"
+            action_color = "#3fb950" if ai_action == "BUY" else "#f85149"
+            action_emoji = "🟢" if ai_action == "BUY" else "🔴"
+
+            col_p1, col_p2, col_p3 = st.columns(3)
+            with col_p1:
+                st.markdown(f"""
+                <div class="tp-card">
+                    <p style="color:#d2a8ff; font-size:11px; text-transform:uppercase; letter-spacing:1px; margin:0 0 12px 0;">✨ Level dari Gemini AI</p>
+                    <div class="tp-row"><span class="tp-label">Posisi</span><span class="tp-value" style="color:{action_color};">{action_emoji} {ai_action}</span></div>
+                    <div class="tp-row"><span class="tp-label">Entry</span><span class="tp-value tp-yellow">{g_entry:.5f}</span></div>
+                    <div class="tp-row"><span class="tp-label">Stop Loss</span><span class="tp-value tp-red">{g_sl:.5f} ({sl_pips} pips)</span></div>
+                    <div class="tp-row"><span class="tp-label">TP 1</span><span class="tp-value tp-green">{g_tp1:.5f} (+{tp1_pips} pips)</span></div>
+                    <div class="tp-row"><span class="tp-label">TP 2</span><span class="tp-value tp-green">{g_tp2:.5f} (+{tp2_pips} pips)</span></div>
+                </div>
+                """, unsafe_allow_html=True)
+            with col_p2:
+                st.markdown(f"""
+                <div class="tp-card">
+                    <p style="color:#8b949e; font-size:11px; text-transform:uppercase; letter-spacing:1px; margin:0 0 12px 0;">Risk & Reward</p>
+                    <div class="tp-row"><span class="tp-label">R/R Ratio</span><span class="tp-value" style="color:{rr_color};">1 : {rr_ratio}</span></div>
+                    <div class="tp-row"><span class="tp-label">Modal</span><span class="tp-value">${modal:,.2f}</span></div>
+                    <div class="tp-row"><span class="tp-label">Lot Size</span><span class="tp-value">{lot_size}</span></div>
+                    <div class="tp-row"><span class="tp-label">Leverage</span><span class="tp-value">1:{leverage}</span></div>
+                    <div class="tp-row"><span class="tp-label">AI Confidence</span><span class="tp-value" style="color:{conf_bar_color if gemini_data else '#8b949e'};">{gemini_data.get("confidence",0)}%</span></div>
+                </div>
+                """, unsafe_allow_html=True)
+            with col_p3:
+                st.markdown(f"""
+                <div class="tp-card">
+                    <p style="color:#8b949e; font-size:11px; text-transform:uppercase; letter-spacing:1px; margin:0 0 12px 0;">Estimasi P&L</p>
+                    <div class="tp-row"><span class="tp-label">Profit TP1</span><span class="tp-value tp-green">+${profit_tp1}</span></div>
+                    <div class="tp-row"><span class="tp-label">Profit TP2</span><span class="tp-value tp-green">+${profit_tp2}</span></div>
+                    <div class="tp-row"><span class="tp-label">Max Loss (SL)</span><span class="tp-value tp-red">-${loss_sl}</span></div>
+                    <div class="tp-row"><span class="tp-label">Worth it?</span><span class="tp-value" style="color:{rr_color};">{"✅ YES" if rr_ratio >= 1.0 else "⚠️ MARGINAL" if rr_ratio >= 0.5 else "❌ SKIP"}</span></div>
+                </div>
+                """, unsafe_allow_html=True)
+
+            # Quick action note
+            dir_word = "BUY di" if ai_action == "BUY" else "SELL di"
             st.markdown(f"""
-            <div style="background:#161b22;border:1px solid #30363d;border-left:4px solid {reasoning_color};border-radius:8px;padding:18px;">
-                <ul style="margin:0 0 12px 0;padding-left:18px;">{points_html}</ul>
-                <p style="color:{reasoning_color};font-size:14px;font-weight:700;margin:0;padding-top:10px;border-top:1px solid #21262d;">{reasoning_conclusion}</p>
+            <div style="background:#161b22; border:1px solid #30363d; border-radius:8px; padding:12px; margin-top:8px;">
+                <p style="color:#8b949e; font-size:12px; margin:0;">
+                ⚡ <strong style="color:#e6edf3;">Quick Action:</strong>
+                {dir_word} <strong style="color:#f0883e;">{g_entry:.5f}</strong> →
+                SL <strong style="color:#f85149;">{g_sl:.5f}</strong> →
+                TP1 <strong style="color:#3fb950;">{g_tp1:.5f}</strong>
+                {"→ TP2 " + f"<strong style='color:#3fb950;'>{g_tp2:.5f}</strong>" if g_tp2 > 0 else ""} |
+                Est. Profit TP1: <strong style="color:#3fb950;">+${profit_tp1}</strong>
+                </p>
             </div>
             """, unsafe_allow_html=True)
 
-            # ── Gemini Display ──
-            if GEMINI_ENABLED and gemini_result:
-                hdr = "✨ Gemini AI — Override Active" if is_override else "✨ Gemini AI Insights"
-                st.markdown("---")
-                st.markdown(f'<p class="section-header">{hdr}</p>', unsafe_allow_html=True)
-                if is_override:
-                    fe = "🟢" if formula_decision=="ENTER" else "🟡" if formula_decision=="WAIT" else "🔴"
-                    ae = "🟢" if decision=="ENTER" else "🟡" if decision=="WAIT" else "🔴"
-                    st.markdown(f"""
-                    <div style="background:#1a0f2e;border:1px solid #6e40c9;border-radius:8px;padding:12px;margin-bottom:10px;">
-                        <p style="color:#d2a8ff;font-size:12px;font-weight:700;margin:0 0 8px 0;">⚡ OVERRIDE AKTIF</p>
-                        <div style="display:flex;gap:16px;font-size:13px;">
-                            <div style="flex:1;text-align:center;opacity:0.6;">
-                                <p style="color:#8b949e;margin:0;font-size:10px;">FORMULA</p>
-                                <p style="color:#8b949e;font-size:16px;font-weight:700;margin:4px 0;">{fe} {formula_decision}</p>
-                            </div>
-                            <div style="color:#6e40c9;font-size:20px;display:flex;align-items:center;">→</div>
-                            <div style="flex:1;text-align:center;">
-                                <p style="color:#d2a8ff;margin:0;font-size:10px;">AI DECISION</p>
-                                <p style="color:#d2a8ff;font-size:16px;font-weight:700;margin:4px 0;">{ae} {decision}</p>
-                                <p style="color:#d2a8ff;font-size:10px;margin:0;">{gemini_result["ai_reason"][:50]}</p>
-                            </div>
-                        </div>
-                    </div>
-                    """, unsafe_allow_html=True)
-                ig = "".join([f'<li style="color:#c9d1d9;font-size:13px;margin-bottom:6px;line-height:1.6;">{p}</li>' for p in gemini_result.get("insights",[])])
-                ks = gemini_result.get("kesimpulan","")
-                if ig:
-                    st.markdown(f"""
-                    <div style="background:linear-gradient(135deg,#1a1a2e,#16213e);border:1px solid #0f3460;border-left:4px solid #d2a8ff;border-radius:8px;padding:16px;">
-                        <ul style="margin:0 0 12px 0;padding-left:18px;">{ig}</ul>
-                        {"<p style=\'color:#d2a8ff;font-size:14px;font-weight:700;margin:0;padding-top:10px;border-top:1px solid #0f3460;\'>" + ks + "</p>" if ks else ""}
-                    </div>
-                    """, unsafe_allow_html=True)
-            elif not GEMINI_ENABLED:
-                st.caption("✨ Gemini AI tidak aktif — tambahkan GEMINI_API_KEY di secrets.toml")
+        elif df is not None and ai_action == "HOLD":
+            _hold_reason = gemini_data.get("reason","") if gemini_data else formula_reason
+            _hold_src    = gemini_data.get("source","gemini") if gemini_data else "formula"
+            _hold_badge  = "🤖 Gemini" if _hold_src=="gemini" else "📐 Formula"
+            st.info(f"🔵 HOLD [{_hold_badge}] — {_hold_reason or 'Belum ada setup yang cukup bagus saat ini.'}")
+            if gemini_data and gemini_data.get("market_reco"):
+                st.markdown(f"""
+                <div style="background:#1b1f2d; border:1px solid #388bfd; border-radius:8px; padding:10px 14px; margin-top:8px;">
+                    <p style="color:#388bfd; font-size:13px; margin:0;">
+                    💡 <strong>Coba pair lain:</strong> {gemini_data["market_reco"]}
+                    </p>
+                </div>
+                """, unsafe_allow_html=True)
+    
+    # AI Reasoning — sekarang full dari Gemini
+    if df is not None:
+        with reasoning_container:
+            st.markdown("---")
+            if gemini_data and gemini_data.get("ai_active") and gemini_data.get("insights"):
+                st.markdown('<p class="section-header">🧠 Gemini AI Reasoning</p>', unsafe_allow_html=True)
+                insights_html = "".join([
+                    f'<li style="color:#c9d1d9;font-size:13px;margin-bottom:8px;line-height:1.6;">{p}</li>'
+                    for p in gemini_data["insights"]
+                ])
+                action_c = "#3fb950" if gemini_data["action"]=="BUY" else "#f85149" if gemini_data["action"]=="SELL" else "#388bfd"
+                st.markdown(f"""
+                <div style="background:linear-gradient(135deg,#1a1a2e,#16213e);
+                     border:1px solid #0f3460; border-left:4px solid #d2a8ff;
+                     border-radius:8px; padding:18px;">
+                    <ul style="margin:0 0 14px 0; padding-left:18px;">{insights_html}</ul>
+                    <p style="color:{action_c}; font-size:14px; font-weight:700; margin:0;
+                       padding-top:10px; border-top:1px solid #0f3460;">
+                        {gemini_data["reason"]}
+                    </p>
+                </div>
+                """, unsafe_allow_html=True)
+
+                # Formula reasoning tetap ada tapi lebih kecil sebagai referensi
+                reasoning_points, reasoning_conclusion, reasoning_color = generate_ai_reasoning(
+                    signal, formula_decision, formula_reason, score_detail, indicators, supports, resistances, trading_mode
+                )
+                with st.expander("📊 Formula Reasoning (referensi)", expanded=False):
+                    for p in reasoning_points:
+                        st.markdown(f"• {p}")
+                    st.markdown(f"**{reasoning_conclusion}**")
+            else:
+                # Fallback: tampilkan formula reasoning
+                reasoning_points, reasoning_conclusion, reasoning_color = generate_ai_reasoning(
+                    signal, formula_decision, formula_reason, score_detail, indicators, supports, resistances, trading_mode
+                )
+                st.markdown('<p class="section-header">🧠 Formula Reasoning</p>', unsafe_allow_html=True)
+                points_html = "".join([
+                    f'<li style="color:#c9d1d9;font-size:13px;margin-bottom:6px;line-height:1.6;">{p}</li>'
+                    for p in reasoning_points
+                ])
+                st.markdown(f"""
+                <div style="background:#161b22; border:1px solid #30363d;
+                     border-left:4px solid {reasoning_color}; border-radius:8px; padding:18px;">
+                    <ul style="margin:0 0 12px 0; padding-left:18px;">{points_html}</ul>
+                    <p style="color:{reasoning_color}; font-size:14px; font-weight:700;
+                       margin:0; padding-top:10px; border-top:1px solid #21262d;">
+                        {reasoning_conclusion}
+                    </p>
+                </div>
+                """, unsafe_allow_html=True)
+                _mode_info = "Gemini aktif" if (use_gemini and GEMINI_ENABLED) else "Formula Engine aktif"
+                st.caption(f"📐 {_mode_info} — klik Refresh untuk analisis baru")
     
 # ─── TAB 2: MULTI TIMEFRAME ───
 with tab2:
@@ -1424,10 +1752,6 @@ with tab4:
                 if outcome == "OPEN":
                     continue
 
-                # Auto-detect pip size berdasarkan harga
-                # Forex (EURUSD dll): harga < 100 → pip = 0.00010
-                # Gold (XAUUSD):      harga > 100 → pip = 0.10
-                # Indices/Oil:        fallback ke persentase
                 if entry_price < 10:
                     pip_size  = 0.00010   # JPY pairs & crypto-like
                 elif entry_price < 100:
@@ -1438,8 +1762,6 @@ with tab4:
                 sl_pips  = abs(entry_price - sl_bt) / pip_size
                 tp_pips  = abs(tp1_bt - entry_price) / pip_size
 
-                # Lot size: untuk gold, 1 lot = 100 oz, mini lot = 10 oz
-                # Estimasi lot dari modal: modal / (entry * 10) untuk gold
                 if entry_price > 100:
                     lot_size = round(bt_modal / (entry_price * 10), 4)
                 else:
@@ -1550,7 +1872,11 @@ with tab5:
         st.info("ℹ️ Auto refresh nonaktif")
 
     st.markdown("---")
-    account = mt5.account_info()
+    
+    # Membungkus pembacaan info akun ke lock thread-safe agar aman
+    with mt5_lock:
+        account = mt5.account_info()
+        
     if account:
         st.markdown(f"""
         <div style="background:#161b22; border:1px solid #30363d; border-radius:8px; padding:16px;">
@@ -1561,7 +1887,7 @@ with tab5:
             📊 Leverage: <span style="color:#e6edf3;">1:{account.leverage}</span><br>
             🔗 Status: <span style="color:#3fb950;">🟢 Connected</span><br>
             ✨ Gemini: <span style="color:#e6edf3;">{"🟢 Aktif" if GEMINI_ENABLED else "🔴 Tidak aktif"}</span><br>
-            Ⓥ Version: <span style="color:#e6edf3;">v3.8 (3-Mode + Gemini Decision Engine)</span><br>
+            ⚙️ Version: <span style="color:#e6edf3;">v4.5 (3-Mode + Gemini Decision Engine)</span><br>
             </p>
         </div>
         """, unsafe_allow_html=True)
