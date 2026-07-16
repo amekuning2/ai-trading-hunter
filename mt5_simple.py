@@ -115,14 +115,9 @@ except Exception:
     GEMINI_API_KEY = ""
 
 GEMINI_ENABLED = bool(GEMINI_API_KEY)
-if GEMINI_ENABLED:
-    client = genai.Client(api_key=GEMINI_API_KEY)
-    response = client.models.generate_content(
-        model="gemini-3.1-flash-lite",
-        contents=prompt
-    )
-
 GEMINI_MODEL = "gemini-3.1-flash-lite"
+if GEMINI_ENABLED:
+    gemini_client = genai.Client(api_key=GEMINI_API_KEY)
 
 # ─────────────────────────────────────────────
 #  MT5 INIT
@@ -362,8 +357,11 @@ BALAS HANYA JSON:
 }}
 """
     try:
-        model    = genai.GenerativeModel(GEMINI_MODEL)
-        response = model.generate_content(prompt, generation_config={"response_mime_type":"application/json"})
+        response = gemini_client.models.generate_content(
+            model=GEMINI_MODEL,
+            contents=prompt,
+            config={"response_mime_type": "application/json"}
+        )
         data     = json.loads(response.text.strip())
         return {
             "action":     data.get("action","HOLD"),

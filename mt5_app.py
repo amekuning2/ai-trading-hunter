@@ -93,12 +93,9 @@ except Exception:
     GEMINI_API_KEY = ""
 
 GEMINI_ENABLED = bool(GEMINI_API_KEY)
+GEMINI_MODEL = "gemini-3.1-flash-lite"
 if GEMINI_ENABLED:
-    client = genai.Client(api_key=GEMINI_API_KEY)
-    response = client.models.generate_content(
-        model="gemini-3.1-flash-lite",
-        contents=prompt
-    )
+    gemini_client = genai.Client(api_key=GEMINI_API_KEY)
 
 
 # ─────────────────────────────────────────────
@@ -278,10 +275,10 @@ WAJIB BALAS HANYA FORMAT JSON INI:
 }}
 """
     try:
-        model = genai.GenerativeModel("gemini-3.1-flash-lite")
-        response = model.generate_content(
-            prompt,
-            generation_config={"response_mime_type": "application/json"}
+        response = gemini_client.models.generate_content(
+            model=GEMINI_MODEL,
+            contents=prompt,
+            config={"response_mime_type": "application/json"}
         )
         data = json.loads(response.text.strip())
         return {
