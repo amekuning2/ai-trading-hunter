@@ -154,7 +154,7 @@ if not st.session_state.get("mt5_connected", False):
     st.error("❌ MT5 tidak terkoneksi. Pastikan MetaTrader5 berjalan di VPS.")
     st.stop()
 
-def get_price(symbol):
+def get_mt5_price(symbol):
     try:
         with mt5_lock:
             mt5.symbol_select(symbol, True)
@@ -402,7 +402,7 @@ for k, v in {
 
 st.markdown("## 📊 MT5 Lite v4.0")
 
-PAIRS = ["XAUUSD","EURUSD","GBPUSD","USDJPY","AUDUSD","USDCHF","NZDUSD","GBPJPY","EURJPY"]
+PAIRS = ["GOLD","EURUSD","GBPUSD","USDJPY","AUDUSD","USDCHF","NZDUSD","GBPJPY","EURJPY"]
 
 col1, col2 = st.columns(2)
 with col1:
@@ -430,7 +430,7 @@ st.session_state["last_symbol"] = symbol
 st.session_state["last_mode"]   = trading_mode
 st.session_state["last_tf"]     = interval_val
 
-pd_data = get_price(symbol)
+pd_data = get_mt5_price(symbol)
 if pd_data:
     bid    = pd_data["bid"]
     ask    = pd_data["ask"]

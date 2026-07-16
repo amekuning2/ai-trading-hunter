@@ -13,6 +13,17 @@ import threading
 # ─────────────────────────────────────────────
 #  CONFIG
 # ─────────────────────────────────────────────
+TICKER_MAP = {
+    "XAUUSD": "GOLD", 
+    # Tambahkan mapping lain di sini jika broker Anda punya nama khusus
+    # Contoh: "EURUSD": "EURUSD.m"
+}
+def validate_symbol(symbol):
+    if not mt5.symbol_select(symbol, True):
+        print(f"Error: Simbol {symbol} tidak ditemukan di Market Watch!")
+        return False
+    return True
+
 st.set_page_config(
     page_title="MT5 Forex Dashboard",
     page_icon="📊",
@@ -327,11 +338,13 @@ TIMEFRAME_MAP = {
 
 @st.cache_data(ttl=30)
 def get_mt5_price(symbol):
+    # Resolve ticker name dari map
+    actual_symbol = TICKER_MAP.get(symbol, symbol)
     try:
         with mt5_lock:
-            mt5.symbol_select(symbol, True)
-            tick = mt5.symbol_info_tick(symbol)
-            info = mt5.symbol_info(symbol)
+            mt5.symbol_select(actual_symbol, True)
+            tick = mt5.symbol_info_tick(actual_symbol)
+            info = mt5.symbol_info(actual_symbol)
         if tick is None or info is None:
             return None
         if tick.bid == 0.0 and tick.ask == 0.0:
@@ -347,9 +360,11 @@ def get_mt5_price(symbol):
 
 @st.cache_data(ttl=15)
 def get_mt5_klines(symbol, timeframe_str, limit):
+    # Resolve ticker name dari map
+    actual_symbol = TICKER_MAP.get(symbol, symbol)
     try:
         with mt5_lock:
-            selected = mt5.symbol_select(symbol, True)
+            selected = mt5.symbol_select(actual_symbol, True)
             if not selected:
                 err = mt5.last_error()
         if not selected:
@@ -358,7 +373,7 @@ def get_mt5_klines(symbol, timeframe_str, limit):
         tf = TIMEFRAME_MAP.get(timeframe_str, mt5.TIMEFRAME_H1)
         
         with mt5_lock:
-            rates = mt5.copy_rates_from_pos(symbol, tf, 0, limit)
+            rates = mt5.copy_rates_from_pos(actual_symbol, tf, 0, limit)
             
         # History sync retry jika server broker belum sempat mendownload data
         retry_delays = [1, 2, 3]
@@ -367,7 +382,7 @@ def get_mt5_klines(symbol, timeframe_str, limit):
                 break
             time.sleep(delay)
             with mt5_lock:
-                rates = mt5.copy_rates_from_pos(symbol, tf, 0, limit)
+                rates = mt5.copy_rates_from_pos(actual_symbol, tf, 0, limit)
                 
         if rates is None or len(rates) == 0:
             with mt5_lock:
@@ -389,10 +404,14 @@ def get_mt5_klines(symbol, timeframe_str, limit):
 def get_all_prices(pairs):
     result = []
     for symbol in pairs:
+        # Tambahkan pemetaan di sini
+        actual_symbol = TICKER_MAP.get(symbol, symbol)
+
         with mt5_lock:
-            tick = mt5.symbol_info_tick(symbol)
-            info = mt5.symbol_info(symbol)
-            rates = mt5.copy_rates_from_pos(symbol, mt5.TIMEFRAME_D1, 0, 2)
+            # Gunakan actual_symbol untuk fungsi MT5
+            tick = mt5.symbol_info_tick(actual_symbol)
+            info = mt5.symbol_info(actual_symbol)
+            rates = mt5.copy_rates_from_pos(actual_symbol, mt5.TIMEFRAME_D1, 0, 2)
             
         if tick and info:
             if rates is not None and len(rates) >= 2:
@@ -1105,7 +1124,7 @@ if not connected:
 # ─────────────────────────────────────────────
 #  MAIN CONTENT
 # ─────────────────────────────────────────────
-DEFAULT_PAIRS = ["EURUSD", "GBPUSD", "USDJPY", "USDCHF", "AUDUSD", "XAUUSD"]
+DEFAULT_PAIRS = ["EURUSD", "GBPUSD", "USDJPY", "USDCHF", "AUDUSD", "GOLD"]
 
 col_sel1, col_sel2 = st.columns([2, 1])
 with col_sel1:
