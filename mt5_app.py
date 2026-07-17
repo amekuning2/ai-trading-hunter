@@ -1352,33 +1352,28 @@ with tab1:
         st.metric("Sinyal:", st.session_state['latest_signal'])
         st.write(f"Analisis Engine: {st.session_state.get('latest_reason', '...')}")
 
+    # STREAMING_CHUNK:Refining adaptive layout...
+    # 1. Posisi Mobile Mode yang strategis (Tepat di bawah Refresh)
+    is_mobile = st.checkbox("📱 Lite Mode (Sembunyikan Chart)", False, help="Aktifkan ini jika di HP agar dashboard ringan")
+
     col_chart, col_signal = st.columns([3, 1])
 
     with col_chart:
         st.markdown('<p class="section-header">Price Chart</p>', unsafe_allow_html=True)
-
-    # 5. UI Adaptif (Bungkus chart)
-    df_chart = st.session_state.get('latest_df')
-    if df_chart is not None and not df_chart.empty:
-        # Jika data ada, gambar chart
-        zones = find_supply_demand_zones(df_chart)
-        fig = build_chart(df_chart, symbol, resistances, supports, zones=zones)
-
-        # --- PEMASANGAN BLOK ADAPTIF ---
-        # STREAMING_CHUNK:Applying adaptive UI rendering...
-
-        # Langsung pakai st.checkbox, jangan dibungkus def main()
-        is_mobile = st.checkbox("📱 Mobile Mode (Lite)", False)
-
-        if not is_mobile:
-            st.subheader("📊 Price Action Chart")
-            st.plotly_chart(fig, use_container_width=True)
+        # 5. UI Adaptif (Bungkus chart)
+        df_chart = st.session_state.get('latest_df')
+        
+        if df_chart is not None and not df_chart.empty:
+            # LOGIKA ADAPTIF: Chart hanya di-render jika Lite Mode OFF
+            if not is_mobile:
+                zones = find_supply_demand_zones(df_chart)
+                fig = build_chart(df_chart, symbol, resistances, supports, zones=zones)
+                st.plotly_chart(fig, use_container_width=True)
+            else:
+                st.info("📱 Lite Mode Aktif: Chart disembunyikan untuk performa.")
         else:
-            st.info("📱 Mode Mobile: Chart disembunyikan untuk menghemat resource.")
-
-    else:
         # Jika data belum ada, tampilkan pesan ramah (bukan error)
-        st.info("👈 Tekan tombol 'Refresh Analisis' di samping untuk memuat chart.")
+            st.info("👈 Tekan tombol 'Refresh Analisis' di samping untuk memuat chart.")
 
     # Placeholder container for layout balance
     trading_plan_container = st.container()
