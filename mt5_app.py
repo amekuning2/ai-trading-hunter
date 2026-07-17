@@ -1339,10 +1339,11 @@ with tab1:
                 return zones
 
             # 3. Simpan ke session_state (PENTING)
-            st.session_state['latest_decision'] = decision
-            st.session_state['latest_df'] = df
-            st.session_state['latest_signal'] = signal
-            st.session_state['latest_reason'] = reason
+            if 'decision' in locals(): # Cek apakah variabel ini berhasil dibuat
+                st.session_state['latest_decision'] = decision
+                st.session_state['latest_df'] = df
+                st.session_state['latest_signal'] = signal
+                st.session_state['latest_reason'] = reason
         else:
             st.error("Gagal menarik data dari MT5.")
 
@@ -1356,34 +1357,31 @@ with tab1:
     with col_chart:
         st.markdown('<p class="section-header">Price Chart</p>', unsafe_allow_html=True)
 
-        df_chart = st.session_state.get('latest_df')
-        if df_chart is not None and not df_chart.empty:
-            # Jika data ada, gambar chart
-            zones = find_supply_demand_zones(df_chart)
-            fig = build_chart(df_chart, symbol, resistances, supports, zones=zones)
+    # 5. UI Adaptif (Bungkus chart)
+    df_chart = st.session_state.get('latest_df')
+    if df_chart is not None and not df_chart.empty:
+        # Jika data ada, gambar chart
+        zones = find_supply_demand_zones(df_chart)
+        fig = build_chart(df_chart, symbol, resistances, supports, zones=zones)
 
-            # --- PEMASANGAN BLOK ADAPTIF ---
-            # STREAMING_CHUNK:Applying adaptive UI rendering...
-            def main():
-                ctrl_col = st.columns([1, 4])
-                with ctrl_col[0]:
-                    st.session_state.mode_mobile = st.checkbox("📱 Mobile Mode", False)
-                    
-            # Checkbox Mobile (Langsung di layar utama)
-            is_mobile = st.checkbox("📱 Mobile Mode (Lite)", False)
+        # --- PEMASANGAN BLOK ADAPTIF ---
+        # STREAMING_CHUNK:Applying adaptive UI rendering...
 
-            if not is_mobile:
-                st.subheader("📊 Price Action Chart")
-                st.plotly_chart(fig, use_container_width=True)
-            else:
-                st.info("📱 Mode Mobile: Chart disembunyikan.")
+        # Langsung pakai st.checkbox, jangan dibungkus def main()
+        is_mobile = st.checkbox("📱 Mobile Mode (Lite)", False)
 
+        if not is_mobile:
+            st.subheader("📊 Price Action Chart")
+            st.plotly_chart(fig, use_container_width=True)
         else:
-            # Jika data belum ada, tampilkan pesan ramah (bukan error)
-            st.info("👈 Tekan tombol 'Refresh Analisis' di samping untuk memuat chart.")
+            st.info("📱 Mode Mobile: Chart disembunyikan untuk menghemat resource.")
 
-        # Placeholder container for layout balance
-        trading_plan_container = st.container()
+    else:
+        # Jika data belum ada, tampilkan pesan ramah (bukan error)
+        st.info("👈 Tekan tombol 'Refresh Analisis' di samping untuk memuat chart.")
+
+    # Placeholder container for layout balance
+    trading_plan_container = st.container()
 
     with col_signal:
         st.markdown('<p class="section-header">🤖 AI Signal</p>', unsafe_allow_html=True)
