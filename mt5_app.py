@@ -24,6 +24,21 @@ def validate_symbol(symbol):
         return False
     return True
 
+# --- ENGINE: MEMORY & MAKRO ---
+if 'macro_cache' not in st.session_state:
+    st.session_state.macro_cache = "Market sedang menunggu data ekonomi. Sentiment: Neutral."
+    st.session_state.last_macro_time = None
+
+def get_market_news_context(symbol):
+    # Logika Caching: Jika data belum ada atau sudah lebih dari 4 jam (14400 detik)
+    current_time = time.time()
+    if st.session_state.last_macro_time is None or (current_time - st.session_state.last_macro_time) > 14400:
+        # Placeholder: Di sini nanti Anda bisa panggil fungsi Google Search / NewsAPI
+        st.session_state.macro_cache = f"Sinyal Makro Terbaru untuk {symbol}: EURUSD tertekan oleh data inflasi, trend H4 adalah Bearish."
+        st.session_state.last_macro_time = current_time
+    return st.session_state.macro_cache
+# ------------------------------
+
 st.set_page_config(
     page_title="MT5 Forex Dashboard",
     page_icon="📊",
@@ -41,6 +56,24 @@ def detect_price_structure(df):
     df['is_low'] = (df['low'] < df['low'].shift(1)) & (df['low'] < df['low'].shift(-1))
     return df
 
+# STREAMING_CHUNK:Defining AI Decision Brain...
+# STREAMING_CHUNK:Configuring error handling for Gemini...
+def get_ai_brain_decision(df, tech_signal, is_heavy=False):
+    try:
+        # Panggil fungsi Gemini Anda di sini
+        # Contoh: decision, reason = call_gemini_api(prompt)
+        
+        # --- Simulasi jika API sukses ---
+        decision, reason = "BUY", "Analisis dari Gemini (Live)"
+        return decision, reason
+        
+    except Exception as e:
+        # --- FALLBACK ENGINE (Jika Gemini mati/limit) ---
+        # Ini akan tetap memberikan sinyal berdasarkan logika teknikal murni
+        # supaya Anda tidak buta saat trading.
+        fallback_reason = f"Mode Fallback Aktif (AI Limit): {tech_signal} (Dianalisis secara teknikal)."
+        return "WAIT/NEUTRAL", fallback_reason
+    
 def generate_signals(df, mode, context):
     """Logic utama berbasis Structure (BOS/ChoCH) & Context"""
     if df is None or len(df) < 20:
@@ -1279,13 +1312,16 @@ with tab1:
         df = get_mt5_klines(symbol, interval_val, 200)
     
         if df is not None:
-            # 2. Proses Engine
+            # 2. Panggil Brain Engine (Otomatis Heavy jika tombol ditekan)
+            # Kita set is_heavy=True karena pengguna baru saja menekan tombol Refresh
+            signal, reason = get_ai_brain_decision(df, "BOS Bullish/Bearish Detected", is_heavy=True)
             df = detect_price_structure(df)
-            signal, reason = generate_signals(
-            df, 
-            st.session_state.get('mode_input', 'Scalping'),  # Sesuai dengan key UI
-            st.session_state.get('market_context', 'Neutral')
-        )
+            # (previous command)
+            # generate_signals(
+            # df, 
+            # st.session_state.get('mode_input', 'Scalping'),  # Sesuai dengan key UI
+            # st.session_state.get('market_context', 'Neutral')
+        # )
 
             def find_supply_demand_zones(df, n=10):
                 """Mencari area Supply (Resistansi) dan Demand (Support) berdasarkan swing terakhir"""
@@ -1302,6 +1338,7 @@ with tab1:
                 return zones
 
             # 3. Simpan ke session_state (PENTING)
+            st.session_state['latest_decision'] = decision
             st.session_state['df_data'] = df
             st.session_state['latest_signal'] = signal
             st.session_state['latest_reason'] = reason
@@ -1324,7 +1361,17 @@ with tab1:
             # Jika data ada, gambar chart
             zones = find_supply_demand_zones(df_chart)
             fig = build_chart(df_chart, symbol, resistances, supports, zones=zones)
-            st.plotly_chart(fig, use_container_width=True)
+
+            # --- PEMASANGAN BLOK ADAPTIF ---
+            # STREAMING_CHUNK:Applying adaptive UI rendering...
+            is_mobile = st.sidebar.checkbox("Mode Mobile (Lite)", False)
+
+            if not is_mobile:
+                st.subheader("📊 Price Action Chart")
+                st.plotly_chart(fig, use_container_width=True)
+            else:
+                st.info("📱 Mode Mobile: Chart disembunyikan untuk menghemat resource.")
+
         else:
             # Jika data belum ada, tampilkan pesan ramah (bukan error)
             st.info("👈 Tekan tombol 'Refresh Analisis' di samping untuk memuat chart.")

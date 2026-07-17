@@ -32,6 +32,43 @@ st.set_page_config(
 )
 
 # ─────────────────────────────────────────────
+#  ENGINE LOGIC (PRICE ACTION)
+# ─────────────────────────────────────────────
+def detect_price_structure(df):
+    """Mendeteksi swing highs dan lows untuk BOS/ChoCH"""
+    # Menghitung swing high/low dengan window 5 candle
+    df['is_high'] = (df['high'] > df['high'].shift(1)) & (df['high'] > df['high'].shift(-1))
+    df['is_low'] = (df['low'] < df['low'].shift(1)) & (df['low'] < df['low'].shift(-1))
+    return df
+
+def generate_signals(df, mode, context):
+    """Logic utama berbasis Structure (BOS/ChoCH) & Context"""
+    if df is None or len(df) < 20:
+        return "WAIT", "Data belum cukup untuk analisa struktur."
+        
+    latest = df.iloc[-1]
+    
+    # 1. Deteksi BOS (Break of Structure)
+    # Jika harga tutup menembus resistance terakhir (20 bar ke belakang)
+    max_resistance = df['high'].rolling(20).max().shift(1).iloc[-1]
+    is_bos = latest['close'] > max_resistance
+    
+    # 2. Filter News (User Context)
+    # Pengecekan sederhana apakah user memasukkan kata kunci 'Bearish' atau 'Bullish'
+    is_bullish_context = "bullish" in context.lower()
+    
+    # 3. Decision Engine
+    if is_bos and is_bullish_context:
+        return "BUY", "BOS Bullish terkonfirmasi + Sentimen Makro Mendukung."
+    
+    # Cek ChoCH (Sederhana: menembus support terakhir)
+    min_support = df['low'].rolling(20).min().shift(1).iloc[-1]
+    if latest['close'] < min_support:
+        return "SELL", "ChoCH Bearish terdeteksi. Struktur pasar patah."
+        
+    return "WAIT", "Menunggu konfirmasi struktur pasar (BOS/ChoCH)."
+
+# ─────────────────────────────────────────────
 #  DARK MODE STYLING
 # ─────────────────────────────────────────────
 st.markdown("""
@@ -980,7 +1017,7 @@ def generate_trading_plan(df, current_price, signal, supports, resistances, moda
 #  Input  : signal, decision, decision_reason, score_detail, indicators, supports, resistances
 #  Output : (points: list[str], conclusion: str, conclusion_color: str)
 # ─────────────────────────────────────────────
-def generate_ai_reasoning(signal, decision, decision_reason, score_detail, indicators, supports, resistances, trading_mode="Ketat"):
+def generate_ai_reasoning(signal, decision, decision_reason, score_detail, indicators, supports, resistances, zones, trading_mode="Ketat"):
     if signal == "HOLD":
         points = [
             "Tidak ada bias arah yang cukup jelas dari kombinasi Trend, Momentum, dan Structure saat ini.",
@@ -1060,8 +1097,21 @@ def generate_ai_reasoning(signal, decision, decision_reason, score_detail, indic
 # ─────────────────────────────────────────────
 #  CHART
 # ─────────────────────────────────────────────
-def build_chart(df, symbol, resistances=[], supports=[]):
+def build_chart(df, symbol, resistances=[], supports=[], zones=[]):
     fig = make_subplots(rows=3, cols=1, shared_xaxes=True, vertical_spacing=0.03, row_heights=[0.6, 0.2, 0.2])
+
+    # Plot Order Block Zones (Supply/Demand)
+    for zone in zones:
+        color = "rgba(248, 81, 73, 0.2)" if zone['type'] == 'supply' else "rgba(63, 185, 80, 0.2)"
+        fig.add_shape(
+            type="rect",
+            # Menggunakan timestamp pertama yang tersedia di dataframe agar zona terlukis dari awal
+            x0=df['timestamp'].iloc[0], # Sesuaikan rentang
+            x1=df['timestamp'].iloc[-1],
+            y0=zone['price'] * 0.9995, y1=zone['price'] * 1.0005,
+            fillcolor=color, line=dict(width=0), opacity=0.4,
+            row=1, col=1
+        )
 
     fig.add_trace(go.Candlestick(
         x=df["timestamp"], open=df["open"], high=df["high"], low=df["low"], close=df["close"],
@@ -1142,7 +1192,7 @@ with tab1:
         if m == "Scalping":  return "⚡ Scalping — M1-M15, TP cepat, agresif"
         if m == "Intraday":  return "🎯 Intraday — M15-H1, balance frekuensi & kualitas"
         return "🛡️ Swing — H4-D1, selektif, RR besar"
-    trading_mode = st.selectbox("🎯 Trading Mode", ["Scalping","Intraday","Swing"], format_func=_mt5_mode_label)
+    trading_mode = st.selectbox("⚙️ Mode", ["Aggressive","Scalping","Intraday"], key="mode_input")
 
     col_tf, col_candle = st.columns([2, 1])
     with col_tf:
@@ -1219,17 +1269,65 @@ with tab1:
             st.caption("📐 Formula aktif")
     with col_btn:
         do_refresh = st.button("🔄 Refresh Analisis", use_container_width=True, key="refresh_btn_mt5")
+        df = None
+        
+    if 'df_data' not in st.session_state:
+        st.session_state['df_data'] = None
+
+    if do_refresh:
+        # 1. Tarik data baru
+        df = get_mt5_klines(symbol, interval_val, 200)
+    
+        if df is not None:
+            # 2. Proses Engine
+            df = detect_price_structure(df)
+            signal, reason = generate_signals(
+            df, 
+            st.session_state.get('mode_input', 'Scalping'),  # Sesuai dengan key UI
+            st.session_state.get('market_context', 'Neutral')
+        )
+
+            def find_supply_demand_zones(df, n=10):
+                """Mencari area Supply (Resistansi) dan Demand (Support) berdasarkan swing terakhir"""
+                zones = []
+                # Deteksi swing high (Supply) dan swing low (Demand)
+                highs = df[df['high'] == df['high'].rolling(n*2+1, center=True).max()]
+                lows = df[df['low'] == df['low'].rolling(n*2+1, center=True).min()]
+    
+                # Ambil 3 swing terakhir untuk masing-masing
+                for _, row in highs.tail(3).iterrows():
+                    zones.append({'type': 'supply', 'price': row['high'], 'time': row['timestamp']})
+                for _, row in lows.tail(3).iterrows():
+                    zones.append({'type': 'demand', 'price': row['low'], 'time': row['timestamp']})
+                return zones
+
+            # 3. Simpan ke session_state (PENTING)
+            st.session_state['df_data'] = df
+            st.session_state['latest_signal'] = signal
+            st.session_state['latest_reason'] = reason
+        else:
+            st.error("Gagal menarik data dari MT5.")
+
+    # 4. Tampilkan hasil (selalu muncul jika ada data di session_state)
+    if 'latest_signal' in st.session_state:
+        st.metric("Sinyal:", st.session_state['latest_signal'])
+        st.write(f"Analisis Engine: {st.session_state['latest_reason']}")
 
     col_chart, col_signal = st.columns([3, 1])
 
     with col_chart:
         st.markdown('<p class="section-header">Price Chart</p>', unsafe_allow_html=True)
-        if df is not None:
-            fig = build_chart(df, symbol, resistances, supports)
+
+        df_chart = st.session_state.get('df_data')
+
+        if df_chart is not None and not df_chart.empty:
+            # Jika data ada, gambar chart
+            zones = find_supply_demand_zones(df_chart)
+            fig = build_chart(df_chart, symbol, resistances, supports, zones=zones)
             st.plotly_chart(fig, use_container_width=True)
         else:
-            err_detail = st.session_state.get("_last_chart_error", "unknown")
-            st.error(f"Gagal load chart data — {err_detail}")
+            # Jika data belum ada, tampilkan pesan ramah (bukan error)
+            st.info("👈 Tekan tombol 'Refresh Analisis' di samping untuk memuat chart.")
 
         # Placeholder container for layout balance
         trading_plan_container = st.container()
@@ -1887,7 +1985,7 @@ with tab5:
             📊 Leverage: <span style="color:#e6edf3;">1:{account.leverage}</span><br>
             🔗 Status: <span style="color:#3fb950;">🟢 Connected</span><br>
             ✨ Gemini: <span style="color:#e6edf3;">{"🟢 Aktif" if GEMINI_ENABLED else "🔴 Tidak aktif"}</span><br>
-            ⚙️ Version: <span style="color:#e6edf3;">v4.5 (3-Mode + Gemini Decision Engine)</span><br>
+            ⚙️ Version: <span style="color:#e6edf3;">v5.0 (3-Mode + Gemini Decision Engine)</span><br>
             </p>
         </div>
         """, unsafe_allow_html=True)
