@@ -320,6 +320,23 @@ st.markdown("""
        dibanding tampilan di HP — dashboard tetap di tengah, rapi. */
     .block-container { max-width: 1100px; margin-left: auto; margin-right: auto; padding-top: 2rem; }
 
+    /* Kotak dropdown (selectbox) & popover-nya sering "ketiban" force-dark mode browser
+       lebih parah dari elemen lain karena dirender komponen internal (BaseWeb), bukan
+       HTML polos — dipaksa light secara eksplisit di sini. */
+    [data-baseweb="select"] > div,
+    [data-testid="stSelectbox"] div[data-baseweb="select"] {
+        background-color: #ffffff !important;
+        color: #1f2328 !important;
+        border: 1px solid #d0d7de !important;
+    }
+    [data-baseweb="select"] * { color: #1f2328 !important; }
+    [data-baseweb="popover"], [data-baseweb="menu"],
+    ul[role="listbox"], li[role="option"] {
+        background-color: #ffffff !important;
+        color: #1f2328 !important;
+    }
+    li[role="option"]:hover { background-color: #f6f8fa !important; }
+
     #MainMenu { visibility: hidden; }
     footer { visibility: hidden; }
     header { visibility: hidden; }
@@ -356,7 +373,7 @@ def formula_signal_engine(df, symbol, bid, digits, trading_mode="Intraday", smc_
     macd_i= ta.trend.MACD(close)
     mv    = macd_i.macd().iloc[-1]
     ms    = macd_i.macd_signal().iloc[-1]
-    ema_fast_w, ema_mid_w = (5, 8) if trading_mode == "Scalping" else (20, 50)
+    ema_fast_w, ema_mid_w = (5, 8) if trading_mode in ("Scalping", "Aggressive") else (20, 50)
     ema20 = ta.trend.EMAIndicator(close, window=ema_fast_w).ema_indicator().iloc[-1]
     ema50 = ta.trend.EMAIndicator(close, window=ema_mid_w).ema_indicator().iloc[-1]
     atr   = ta.volatility.AverageTrueRange(df["high"], df["low"], close, window=14).average_true_range().iloc[-1]
@@ -714,7 +731,7 @@ def calculate_signal(df, mtf_score_override=None, trading_mode="Intraday", smc_z
     current_price = close.iloc[-1]
 
     # ── Hitung semua indikator ──────────────────
-    is_scalping = trading_mode == "Scalping"
+    is_scalping = trading_mode in ("Scalping", "Aggressive")
     ema_fast_w, ema_mid_w, ema_slow_w = (5, 8, 13) if is_scalping else (20, 50, 200)
 
     ema20  = ta.trend.EMAIndicator(close, window=ema_fast_w).ema_indicator()
@@ -1425,12 +1442,12 @@ def build_chart(df, symbol, resistances=[], supports=[], zones=[], smc=None, tra
         increasing_fillcolor="#dafbe1", decreasing_fillcolor="#ffebe9",
     ), row=1, col=1)
 
-    ema_fast_w, ema_mid_w = (5, 8) if trading_mode == "Scalping" else (20, 50)
+    ema_fast_w, ema_mid_w = (5, 8) if trading_mode in ("Scalping", "Aggressive") else (20, 50)
     ema20 = ta.trend.EMAIndicator(df["close"], window=ema_fast_w).ema_indicator()
     ema50 = ta.trend.EMAIndicator(df["close"], window=ema_mid_w).ema_indicator()
     fig.add_trace(go.Scatter(x=df["timestamp"], y=ema20, name=f"EMA{ema_fast_w}", line=dict(color="#bc4c00", width=1.5, dash="dot")), row=1, col=1)
     fig.add_trace(go.Scatter(x=df["timestamp"], y=ema50, name=f"EMA{ema_mid_w}", line=dict(color="#0969da", width=1.5, dash="dot")), row=1, col=1)
-    if trading_mode == "Scalping":
+    if trading_mode in ("Scalping", "Aggressive"):
         ema13 = ta.trend.EMAIndicator(df["close"], window=13).ema_indicator()
         fig.add_trace(go.Scatter(x=df["timestamp"], y=ema13, name="EMA13", line=dict(color="#8250df", width=1.5, dash="dot")), row=1, col=1)
 
@@ -2295,7 +2312,7 @@ with tab5:
             📊 Leverage: <span style="color:#1f2328;">1:{account.leverage}</span><br>
             🔗 Status: <span style="color:#1a7f37;">🟢 Connected</span><br>
             ✨ Gemini: <span style="color:#1f2328;">{"🟢 Aktif" if GEMINI_ENABLED else "🔴 Tidak aktif"}</span><br>
-            ⚙️ Version: <span style="color:#1f2328;">v5.5 (3-Mode + Gemini Decision Engine)</span><br>
+            ⚙️ Version: <span style="color:#1f2328;">6.0 (3-Mode + Gemini Decision Engine)</span><br>
             </p>
         </div>
         """, unsafe_allow_html=True)
