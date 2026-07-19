@@ -7,7 +7,10 @@ import MetaTrader5 as mt5
 import ta
 import time
 from datetime import datetime
-from google import genai
+try:
+    from google import genai
+except ImportError:
+    genai = None  # google-genai belum terinstall / bentrok dengan paket lain -> fallback ke Formula Engine
 import json
 import threading
 
@@ -25,7 +28,6 @@ st.set_page_config(
 mt5_lock = threading.Lock()
 
 # DEFINISI AWAL UNTUK MENGHINDARI NAMEERROR
-if 'trading_plan_container' not in st.session_state: st.session_state.trading_plan_container = st.container()
 if 'df_data' not in st.session_state: st.session_state.df_data = None
 if "auto_refresh_mt5" not in st.session_state: st.session_state["auto_refresh_mt5"] = False
 if "use_gemini_mt5" not in st.session_state: st.session_state["use_gemini_mt5"] = True
@@ -43,7 +45,6 @@ ai_sl = 0.0
 formula_reason = ""
 formula_decision = "SKIP"
 formula_color = "#57606a"
-trading_plan_container = st.session_state.trading_plan_container
 
 
 # ─────────────────────────────────────────────
@@ -315,6 +316,10 @@ st.markdown("""
     .tp-red { color: #cf222e !important; }
     .tp-yellow { color: #bc4c00 !important; }
 
+    /* Batasi lebar konten di layar desktop lebar biar tidak kelihatan "kepencar"/kegedean
+       dibanding tampilan di HP — dashboard tetap di tengah, rapi. */
+    .block-container { max-width: 1100px; margin-left: auto; margin-right: auto; padding-top: 2rem; }
+
     #MainMenu { visibility: hidden; }
     footer { visibility: hidden; }
     header { visibility: hidden; }
@@ -333,7 +338,7 @@ try:
 except Exception:
     GEMINI_API_KEY = ""
 
-GEMINI_ENABLED = bool(GEMINI_API_KEY)
+GEMINI_ENABLED = bool(GEMINI_API_KEY) and genai is not None
 GEMINI_MODEL = "gemini-3.1-flash-lite"
 if GEMINI_ENABLED:
     gemini_client = genai.Client(api_key=GEMINI_API_KEY)
@@ -1543,8 +1548,9 @@ with tab1:
 
     st.markdown("---")
 
-    df = get_mt5_klines(symbol, interval_val, candles)
-    resistances, supports = get_support_resistance(df)
+    with st.spinner(f"📡 Mengambil data {symbol} · {interval_val}..."):
+        df = get_mt5_klines(symbol, interval_val, candles)
+        resistances, supports = get_support_resistance(df)
 
     if df is not None:
         col1, col2, col3, col4 = st.columns(4)
@@ -1635,7 +1641,7 @@ with tab1:
             st.info("👈 Tekan tombol 'Refresh Analisis' di samping untuk memuat chart.")
         
         # Trading Plan — Gemini yang kasih level, formula hitung lot/PnL
-        with trading_plan_container:
+        with st.container():
             st.markdown("---")
             st.markdown('<p class="section-header">📋 Trading Plan</p>', unsafe_allow_html=True)
 
