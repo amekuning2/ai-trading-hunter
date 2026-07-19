@@ -1,5 +1,6 @@
 import streamlit as st
 import pandas as pd
+import numpy as np
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 import MetaTrader5 as mt5
@@ -9,6 +10,157 @@ from datetime import datetime
 from google import genai
 import json
 import threading
+
+
+# ─────────────────────────────────────────────
+#  INITIAL SETUP & LOCKS
+# ─────────────────────────────────────────────
+st.set_page_config(
+    page_title="MT5 Forex Dashboard",
+    page_icon="📊",
+    layout="wide",
+    initial_sidebar_state="collapsed"
+)
+
+mt5_lock = threading.Lock()
+
+# DEFINISI AWAL UNTUK MENGHINDARI NAMEERROR
+if 'trading_plan_container' not in st.session_state: st.session_state.trading_plan_container = st.container()
+if 'df_data' not in st.session_state: st.session_state.df_data = None
+if "auto_refresh_mt5" not in st.session_state: st.session_state["auto_refresh_mt5"] = False
+if "use_gemini_mt5" not in st.session_state: st.session_state["use_gemini_mt5"] = True
+if "gemini_result_mt5" not in st.session_state: st.session_state["gemini_result_mt5"] = None
+
+
+# Inisialisasi variabel global dummy untuk menghindari NameError
+gemini_data = None
+ai_action = "HOLD"
+conf_bar_color = "#57606a"
+ai_entry = 0.0
+ai_tp1 = 0.0
+ai_tp2 = 0.0
+ai_sl = 0.0
+formula_reason = ""
+formula_decision = "SKIP"
+formula_color = "#57606a"
+trading_plan_container = st.session_state.trading_plan_container
+
+
+# ─────────────────────────────────────────────
+#  UTILS & ENGINE
+# ─────────────────────────────────────────────
+def init_mt5():
+    with mt5_lock:
+        if not mt5.initialize(): return False, mt5.last_error()
+        return True, None
+    
+def find_supply_demand_zones(df, n=10):
+    zones = []
+    highs = df[df['high'] == df['high'].rolling(n*2+1, center=True).max()]
+    lows = df[df['low'] == df['low'].rolling(n*2+1, center=True).min()]
+    for _, row in highs.tail(3).iterrows():
+        zones.append({'type': 'supply', 'price': row['high'], 'time': row['timestamp']})
+    for _, row in lows.tail(3).iterrows():
+        zones.append({'type': 'demand', 'price': row['low'], 'time': row['timestamp']})
+    return zones
+
+def detect_price_structure(df):
+    df['is_high'] = (df['high'] > df['high'].shift(1)) & (df['high'] > df['high'].shift(-1))
+    df['is_low'] = (df['low'] < df['low'].shift(1)) & (df['low'] < df['low'].shift(-1))
+    return df
+
+# ─────────────────────────────────────────────
+#  SMC ENGINE — Order Block / FVG / BoS
+#  Porting dari Pine Script "Super OrderBlock / FVG / BoS Tools"
+#  by makuchaku & eFe -> Python (pandas/numpy), murni buat visualisasi
+#  di Plotly (build_chart) + summary teks.
+# ─────────────────────────────────────────────
+def detect_smc_zones(df, pivot_lookup=1, max_boxes=10):
+    """
+    Deteksi:
+      - Order Block (OB) bullish & bearish
+      - Fair Value Gap (FVG) bullish & bearish (+ flag structure-breaking)
+      - Break of Structure (BoS) bullish & bearish, berbasis pivot high/low
+
+    Logic 1:1 ngikutin Pine Script aslinya:
+      isObUp(i)   = isDown(i+1) and isUp(i) and close[i] > high[i+1]
+      isObDown(i) = isUp(i+1) and isDown(i) and close[i] < low[i+1]
+      isFvgUp(i)  = low[i] > high[i+2]
+      isFvgDown(i)= high[i] < low[i+2]
+      BoS         = close cross di atas/bawah pivot high/low terakhir
+
+    Return dict berisi list zone (left/right = index candle, top/bottom = harga)
+    dan list event BoS. Semua sudah dibatasi max_boxes item terakhir per kategori
+    (biar chart gak penuh sesak, sama kayak `obMaxBoxSet`/`fvgMaxBoxSet` di Pine).
+    """
+    n = len(df)
+    empty = {"bull_ob": [], "bear_ob": [], "bull_fvg": [], "bear_fvg": [], "bos": []}
+    if n < (pivot_lookup * 2 + 5):
+        return empty
+
+    o = df["open"].values
+    h = df["high"].values
+    l = df["low"].values
+    c = df["close"].values
+
+    def is_up(i):   return c[i] > o[i]
+    def is_down(i): return c[i] < o[i]
+
+    bull_ob, bear_ob = [], []
+    bull_fvg, bear_fvg = [], []
+
+    for i in range(2, n):
+        # --- Order Block ---
+        # candle "signal" = i-1, candle "trapped" = i-2 (mirror index=1 di Pine)
+        if is_down(i - 2) and is_up(i - 1) and c[i - 1] > h[i - 2]:
+            bull_ob.append({
+                "left": i - 2, "right": i,
+                "top": float(h[i - 2]), "bottom": float(min(l[i - 2], l[i - 1])),
+            })
+        if is_up(i - 2) and is_down(i - 1) and c[i - 1] < l[i - 2]:
+            bear_ob.append({
+                "left": i - 2, "right": i,
+                "top": float(max(h[i - 2], h[i - 1])), "bottom": float(l[i - 2]),
+            })
+        # --- Fair Value Gap --- (index=0 di Pine artinya candle sekarang -> i)
+        if l[i] > h[i - 2]:
+            bull_fvg.append({"left": i - 2, "right": i, "top": float(l[i]), "bottom": float(h[i - 2])})
+        if h[i] < l[i - 2]:
+            bear_fvg.append({"left": i - 2, "right": i, "top": float(l[i - 2]), "bottom": float(h[i])})
+
+    # --- Pivot High/Low (dasar buat BoS), butuh `pivot_lookup` bar kiri & kanan buat konfirmasi ---
+    lb = pivot_lookup
+    pivot_top = np.full(n, np.nan)
+    pivot_bottom = np.full(n, np.nan)
+    for idx in range(lb, n - lb):
+        window_h = h[idx - lb: idx + lb + 1]
+        window_l = l[idx - lb: idx + lb + 1]
+        if h[idx] == window_h.max():
+            pivot_top[idx + lb] = h[idx]          # baru "diketahui" setelah lb bar berikutnya
+        if l[idx] == window_l.min():
+            pivot_bottom[idx + lb] = l[idx]
+
+    pivot_top = pd.Series(pivot_top).ffill().values
+    pivot_bottom = pd.Series(pivot_bottom).ffill().values
+
+    # --- Break of Structure: close cross di atas pivot high terakhir (bull) / di bawah pivot low (bear) ---
+    bos_events = []
+    for i in range(1, n):
+        pt, pt_prev = pivot_top[i], pivot_top[i - 1]
+        if not np.isnan(pt) and not np.isnan(pt_prev) and c[i] > pt and c[i - 1] <= pt_prev:
+            bos_events.append({"index": i, "type": "bull", "price": float(pt)})
+        pb, pb_prev = pivot_bottom[i], pivot_bottom[i - 1]
+        if not np.isnan(pb) and not np.isnan(pb_prev) and c[i] < pb and c[i - 1] >= pb_prev:
+            bos_events.append({"index": i, "type": "bear", "price": float(pb)})
+
+    return {
+        "bull_ob":  bull_ob[-max_boxes:],
+        "bear_ob":  bear_ob[-max_boxes:],
+        "bull_fvg": bull_fvg[-max_boxes:],
+        "bear_fvg": bear_fvg[-max_boxes:],
+        "bos":      bos_events[-max_boxes:],
+    }
+
 
 # ─────────────────────────────────────────────
 #  CONFIG
@@ -39,22 +191,6 @@ def get_market_news_context(symbol):
     return st.session_state.macro_cache
 # ------------------------------
 
-st.set_page_config(
-    page_title="MT5 Forex Dashboard",
-    page_icon="📊",
-    layout="wide",
-    initial_sidebar_state="collapsed"
-)
-
-# ─────────────────────────────────────────────
-#  ENGINE LOGIC (PRICE ACTION)
-# ─────────────────────────────────────────────
-def detect_price_structure(df):
-    """Mendeteksi swing highs dan lows untuk BOS/ChoCH"""
-    # Menghitung swing high/low dengan window 5 candle
-    df['is_high'] = (df['high'] > df['high'].shift(1)) & (df['high'] > df['high'].shift(-1))
-    df['is_low'] = (df['low'] < df['low'].shift(1)) & (df['low'] < df['low'].shift(-1))
-    return df
 
 # STREAMING_CHUNK:Defining AI Decision Brain...
 # STREAMING_CHUNK:Configuring error handling for Gemini...
@@ -102,60 +238,82 @@ def generate_signals(df, mode, context):
     return "WAIT", "Menunggu konfirmasi struktur pasar (BOS/ChoCH)."
 
 # ─────────────────────────────────────────────
-#  DARK MODE STYLING
+#  LIGHT MODE STYLING
 # ─────────────────────────────────────────────
 st.markdown("""
 <style>
-    .stApp { background-color: #0d1117; color: #e6edf3; }
-    .stSidebar { background-color: #161b22; border-right: 1px solid #30363d; }
+    /* FIX: paksa light mode — beberapa browser mobile (Chrome/Samsung Internet "force dark")
+       otomatis membalik warna kalau halaman tidak menyatakan color-scheme secara eksplisit.
+       Ini penyebab utama background jadi hitam & teks susah dibaca di HP walau di desktop normal. */
+    :root, html, body { color-scheme: light only !important; }
+    html, body, .stApp,
+    [data-testid="stAppViewContainer"], [data-testid="stMain"],
+    [data-testid="stHeader"], [data-testid="stToolbar"],
+    [data-testid="stBottomBlockContainer"], [data-testid="stAppViewBlockContainer"],
+    .main, .block-container {
+        background-color: #ffffff !important;
+        color: #1f2328 !important;
+    }
+    .stApp { color: #1f2328; }
+    .stSidebar { background-color: #f6f8fa; border-right: 1px solid #d0d7de; }
+
+    /* Pastikan semua teks & widget bawaan Streamlit ikut kebaca di background putih */
+    p, span, label, div, li { color: #1f2328; }
+    .stMarkdown, .stText { color: #1f2328; }
+    [data-testid="stSelectbox"] label, [data-testid="stTextInput"] label,
+    [data-testid="stNumberInput"] label, [data-testid="stSlider"] label,
+    [data-testid="stCheckbox"] label { color: #1f2328 !important; }
+    [data-testid="stWidgetLabel"] p { color: #1f2328 !important; }
+    .stButton button { background-color: #f6f8fa; color: #1f2328; border: 1px solid #d0d7de; }
+    .stButton button:hover { background-color: #eaeef2; border-color: #57606a; }
 
     [data-testid="metric-container"] {
-        background: #161b22;
-        border: 1px solid #30363d;
+        background: #f6f8fa;
+        border: 1px solid #d0d7de;
         border-radius: 8px;
         padding: 16px;
     }
-    [data-testid="metric-container"] label { color: #8b949e !important; font-size: 11px; text-transform: uppercase; letter-spacing: 1px; }
-    [data-testid="metric-container"] [data-testid="stMetricValue"] { color: #e6edf3; font-size: 22px; font-weight: 700; }
+    [data-testid="metric-container"] label { color: #57606a !important; font-size: 11px; text-transform: uppercase; letter-spacing: 1px; }
+    [data-testid="metric-container"] [data-testid="stMetricValue"] { color: #1f2328; font-size: 22px; font-weight: 700; }
 
-    .signal-buy { background: linear-gradient(135deg, #0d2b1d, #0f3d2a); border: 1px solid #2ea043; border-left: 4px solid #2ea043; border-radius: 8px; padding: 20px; text-align: center; }
-    .signal-sell { background: linear-gradient(135deg, #2d1b1b, #3d1f1f); border: 1px solid #f85149; border-left: 4px solid #f85149; border-radius: 8px; padding: 20px; text-align: center; }
-    .signal-hold { background: linear-gradient(135deg, #1b1f2d, #1e2540); border: 1px solid #388bfd; border-left: 4px solid #388bfd; border-radius: 8px; padding: 20px; text-align: center; }
+    .signal-buy { background: linear-gradient(135deg, #dafbe1, #c6f6d5); border: 1px solid #2da44e; border-left: 4px solid #2da44e; border-radius: 8px; padding: 20px; text-align: center; }
+    .signal-sell { background: linear-gradient(135deg, #ffebe9, #ffd7d5); border: 1px solid #cf222e; border-left: 4px solid #cf222e; border-radius: 8px; padding: 20px; text-align: center; }
+    .signal-hold { background: linear-gradient(135deg, #ddf4ff, #cae8ff); border: 1px solid #0969da; border-left: 4px solid #0969da; border-radius: 8px; padding: 20px; text-align: center; }
     .signal-text { font-size: 28px; font-weight: 800; margin: 0; letter-spacing: 2px; }
-    .signal-buy .signal-text { color: #3fb950; }
-    .signal-sell .signal-text { color: #f85149; }
-    .signal-hold .signal-text { color: #388bfd; }
-    .signal-reason { color: #8b949e; font-size: 12px; margin-top: 8px; }
+    .signal-buy .signal-text { color: #1a7f37; }
+    .signal-sell .signal-text { color: #cf222e; }
+    .signal-hold .signal-text { color: #0969da; }
+    .signal-reason { color: #57606a; font-size: 12px; margin-top: 8px; }
 
     .badge { display: inline-block; padding: 3px 10px; border-radius: 20px; font-size: 11px; font-weight: 600; margin: 2px; }
-    .badge-green { background: #0d2b1d; color: #3fb950; border: 1px solid #2ea043; }
-    .badge-red { background: #2d1b1b; color: #f85149; border: 1px solid #f85149; }
-    .badge-neutral { background: #1b1f2d; color: #8b949e; border: 1px solid #30363d; }
+    .badge-green { background: #dafbe1; color: #1a7f37; border: 1px solid #2da44e; }
+    .badge-red { background: #ffebe9; color: #cf222e; border: 1px solid #cf222e; }
+    .badge-neutral { background: #ddf4ff; color: #57606a; border: 1px solid #d0d7de; }
 
-    .section-header { color: #8b949e; font-size: 11px; text-transform: uppercase; letter-spacing: 2px; border-bottom: 1px solid #30363d; padding-bottom: 8px; margin-bottom: 16px; }
+    .section-header { color: #57606a; font-size: 11px; text-transform: uppercase; letter-spacing: 2px; border-bottom: 1px solid #d0d7de; padding-bottom: 8px; margin-bottom: 16px; }
 
-    .pair-card { background: #161b22; border: 1px solid #30363d; border-radius: 8px; padding: 12px; margin: 4px 0; display: flex; justify-content: space-between; align-items: center; }
+    .pair-card { background: #f6f8fa; border: 1px solid #d0d7de; border-radius: 8px; padding: 12px; margin: 4px 0; display: flex; justify-content: space-between; align-items: center; }
 
-    .mtf-card { background: #161b22; border: 1px solid #30363d; border-radius: 8px; padding: 12px; text-align: center; margin: 4px 0; }
-    .mtf-buy { border-left: 3px solid #3fb950; }
-    .mtf-sell { border-left: 3px solid #f85149; }
-    .mtf-hold { border-left: 3px solid #388bfd; }
+    .mtf-card { background: #f6f8fa; border: 1px solid #d0d7de; border-radius: 8px; padding: 12px; text-align: center; margin: 4px 0; }
+    .mtf-buy { border-left: 3px solid #1a7f37; }
+    .mtf-sell { border-left: 3px solid #cf222e; }
+    .mtf-hold { border-left: 3px solid #0969da; }
 
-    .strength-bar-container { background: #21262d; border-radius: 20px; height: 8px; margin: 8px 0; overflow: hidden; }
+    .strength-bar-container { background: #eaeef2; border-radius: 20px; height: 8px; margin: 8px 0; overflow: hidden; }
     .strength-bar-fill { height: 100%; border-radius: 20px; }
 
     .sr-level { display: flex; justify-content: space-between; padding: 6px 10px; border-radius: 6px; margin: 3px 0; font-size: 12px; }
-    .sr-resistance { background: #2d1b1b; border-left: 3px solid #f85149; }
-    .sr-support { background: #0d2b1d; border-left: 3px solid #3fb950; }
+    .sr-resistance { background: #ffebe9; border-left: 3px solid #cf222e; }
+    .sr-support { background: #dafbe1; border-left: 3px solid #1a7f37; }
 
-    .tp-card { background: #161b22; border: 1px solid #30363d; border-radius: 10px; padding: 16px; margin: 8px 0; }
-    .tp-row { display: flex; justify-content: space-between; padding: 6px 0; border-bottom: 1px solid #21262d; font-size: 13px; }
+    .tp-card { background: #f6f8fa; border: 1px solid #d0d7de; border-radius: 10px; padding: 16px; margin: 8px 0; }
+    .tp-row { display: flex; justify-content: space-between; padding: 6px 0; border-bottom: 1px solid #eaeef2; font-size: 13px; }
     .tp-row:last-child { border-bottom: none; }
-    .tp-label { color: #8b949e; }
-    .tp-value { color: #e6edf3; font-weight: 600; }
-    .tp-green { color: #3fb950 !important; }
-    .tp-red { color: #f85149 !important; }
-    .tp-yellow { color: #f0883e !important; }
+    .tp-label { color: #57606a; }
+    .tp-value { color: #1f2328; font-weight: 600; }
+    .tp-green { color: #1a7f37 !important; }
+    .tp-red { color: #cf222e !important; }
+    .tp-yellow { color: #bc4c00 !important; }
 
     #MainMenu { visibility: hidden; }
     footer { visibility: hidden; }
@@ -185,7 +343,7 @@ if GEMINI_ENABLED:
 #  Aktif kalau Gemini limit/di-toggle off
 #  XAUUSD: TP +1.5/+2.5, SL -16 (terbukti dari demo trading)
 # ─────────────────────────────────────────────
-def formula_signal_engine(df, symbol, bid, digits):
+def formula_signal_engine(df, symbol, bid, digits, trading_mode="Intraday", smc_zones=None):
     if df is None or len(df) < 50:
         return None
     close = df["close"]
@@ -193,13 +351,26 @@ def formula_signal_engine(df, symbol, bid, digits):
     macd_i= ta.trend.MACD(close)
     mv    = macd_i.macd().iloc[-1]
     ms    = macd_i.macd_signal().iloc[-1]
-    ema20 = ta.trend.EMAIndicator(close, window=20).ema_indicator().iloc[-1]
-    ema50 = ta.trend.EMAIndicator(close, window=50).ema_indicator().iloc[-1]
+    ema_fast_w, ema_mid_w = (5, 8) if trading_mode == "Scalping" else (20, 50)
+    ema20 = ta.trend.EMAIndicator(close, window=ema_fast_w).ema_indicator().iloc[-1]
+    ema50 = ta.trend.EMAIndicator(close, window=ema_mid_w).ema_indicator().iloc[-1]
     atr   = ta.volatility.AverageTrueRange(df["high"], df["low"], close, window=14).average_true_range().iloc[-1]
     is_xau = "XAU" in symbol or "GOL" in symbol
     is_jpy = "JPY" in symbol
-    bull = sum([bid > ema20, bid > ema50, mv > ms, rsi < 60])
-    bear = sum([bid < ema20, bid < ema50, mv < ms, rsi > 40])
+
+    # SMC (Order Block/BoS) sebagai bahan pertimbangan tambahan, bukan cuma EMA+MACD+RSI
+    smc_bull_vote, smc_bear_vote = False, False
+    smc_txt = ""
+    if smc_zones:
+        bos_list = smc_zones.get("bos") or []
+        if bos_list:
+            if bos_list[-1]["type"] == "bull":
+                smc_bull_vote = True; smc_txt = "BoS Bullish"
+            else:
+                smc_bear_vote = True; smc_txt = "BoS Bearish"
+
+    bull = sum([bid > ema20, bid > ema50, mv > ms, rsi < 60, smc_bull_vote])
+    bear = sum([bid < ema20, bid < ema50, mv < ms, rsi > 40, smc_bear_vote])
     if bull >= 3:
         action = "BUY"
         entry  = round(bid, digits)
@@ -228,8 +399,9 @@ def formula_signal_engine(df, symbol, bid, digits):
         "confidence":min(int((max(bull,bear)/4)*80+20),85),
         "reason":f"{'Bullish' if action=='BUY' else 'Bearish'} — EMA+MACD+{rsi_note} konfirmasi.",
         "insights":[
-            f"EMA20={ema20:.{digits}f} EMA50={ema50:.{digits}f} — price {'above' if bid>ema50 else 'below'} EMA50",
+            f"EMA{ema_fast_w}={ema20:.{digits}f} EMA{ema_mid_w}={ema50:.{digits}f} — price {'above' if bid>ema50 else 'below'} EMA{ema_mid_w}",
             f"MACD {'bullish' if mv>ms else 'bearish'} cross, RSI={rsi:.1f}, ATR={atr:.{digits}f}",
+            f"SMC: {smc_txt if smc_txt else 'belum ada BoS terbaru'}",
             f"Level {'XAUUSD scalping (TP kecil realistis)' if is_xau else 'ATR-based forex'}",
         ],
         "ai_active":True,"source":"formula","market_reco":"",
@@ -504,8 +676,13 @@ def get_all_prices(pairs):
 #  Bobot: Trend=35, Momentum=25, Structure=20,
 #         MTF=15, Volume=5  → Total=100
 # ─────────────────────────────────────────────
-def calculate_signal(df, mtf_score_override=None):
+def calculate_signal(df, mtf_score_override=None, trading_mode="Intraday", smc_zones=None):
     """
+    trading_mode : "Scalping" -> pakai EMA cepat 5/8/13 (sesuai request scalping EMA 5/8/13),
+                   mode lain  -> tetap EMA 20/50/200.
+    smc_zones    : output dari detect_smc_zones() (Order Block/FVG/BoS ala Super OrderBlock
+                   by makuchaku) — dipakai sebagai bahan pertimbangan tambahan buat BUY/SELL,
+                   bukan cuma buat gambar chart.
     Returns:
         signal       : "BUY" | "SELL" | "HOLD"
         reason       : string deskripsi
@@ -532,9 +709,12 @@ def calculate_signal(df, mtf_score_override=None):
     current_price = close.iloc[-1]
 
     # ── Hitung semua indikator ──────────────────
-    ema20  = ta.trend.EMAIndicator(close, window=20).ema_indicator()
-    ema50  = ta.trend.EMAIndicator(close, window=50).ema_indicator()
-    ema200 = ta.trend.EMAIndicator(close, window=200).ema_indicator() if len(close) >= 200 else ema50
+    is_scalping = trading_mode == "Scalping"
+    ema_fast_w, ema_mid_w, ema_slow_w = (5, 8, 13) if is_scalping else (20, 50, 200)
+
+    ema20  = ta.trend.EMAIndicator(close, window=ema_fast_w).ema_indicator()
+    ema50  = ta.trend.EMAIndicator(close, window=ema_mid_w).ema_indicator()
+    ema200 = ta.trend.EMAIndicator(close, window=ema_slow_w).ema_indicator() if len(close) >= ema_slow_w else ema50
 
     ema20_val  = ema20.iloc[-1]
     ema50_val  = ema50.iloc[-1]
@@ -689,9 +869,35 @@ def calculate_signal(df, mtf_score_override=None):
     else:
         volume_score = 1
 
+    # ── 6. SMC CONFLUENCE — Order Block / FVG / BoS (porting Super OrderBlock by makuchaku) ──
+    # Tidak ditambahkan ke total_score (biar skala /100 tetap konsisten & tidak merusak
+    # threshold ENTER/WAIT/SKIP lama), tapi jadi salah satu bahan pertimbangan arah BUY/SELL,
+    # sesuai permintaan: OB/BoS ikut dipertimbangkan, bukan cuma dekorasi di chart.
+    smc_bias = 0
+    smc_notes = []
+    if smc_zones:
+        bull_ob  = smc_zones.get("bull_ob") or []
+        bear_ob  = smc_zones.get("bear_ob") or []
+        bos_list = smc_zones.get("bos") or []
+
+        if bos_list:
+            last_bos = bos_list[-1]
+            if last_bos["type"] == "bull":
+                smc_bias += 1; smc_notes.append("BoS terakhir Bullish")
+            else:
+                smc_bias -= 1; smc_notes.append("BoS terakhir Bearish")
+
+        if bull_ob and bull_ob[-1]["bottom"] <= current_price <= bull_ob[-1]["top"] * 1.002:
+            smc_bias += 1; smc_notes.append("harga di zona Bull Order Block")
+
+        if bear_ob and bear_ob[-1]["bottom"] * 0.998 <= current_price <= bear_ob[-1]["top"]:
+            smc_bias -= 1; smc_notes.append("harga di zona Bear Order Block")
+
+    smc_note = ", ".join(smc_notes) if smc_notes else "netral (belum ada OB/BoS relevan)"
+
     # ── TOTAL ──────────────────────────────────
     total_score = trend_score + momentum_score + structure_score + mtf_score + volume_score
-    weighted_bias = (trend_bias * 35) + (momentum_bias * 25) + (structure_bias * 20)
+    weighted_bias = (trend_bias * 35) + (momentum_bias * 25) + (structure_bias * 20) + (smc_bias * 10)
     
     # ── SIGNAL DECISION ────────────────────────
     if weighted_bias > 0 and total_score >= 60:
@@ -719,7 +925,7 @@ def calculate_signal(df, mtf_score_override=None):
         reason = "Market Bias: NETRAL — tunggu arah yang lebih jelas"
     else:
         strength = "STRONG" if confidence >= 75 else "MODERATE" if confidence >= 60 else "WEAK"
-        reason = f"Market Bias: {signal} — {strength} ({confidence}/100)"
+        reason = f"Market Bias: {signal} — {strength} ({confidence}/100), SMC: {smc_note}"
 
     # ── BADGES (kompatibel UI lama) ─────────────
     signals = {}
@@ -750,6 +956,10 @@ def calculate_signal(df, mtf_score_override=None):
     if vol_ratio >= 1.5: signals["VOL"] = ("SURGE ⚡", "green")
     else:                signals["VOL"] = ("NORMAL", "neutral")
 
+    if smc_bias > 0:   signals["SMC"] = ("BULLISH OB/BoS", "green")
+    elif smc_bias < 0: signals["SMC"] = ("BEARISH OB/BoS", "red")
+    else:              signals["SMC"] = ("NEUTRAL", "neutral")
+
     # ── RAW VALUES ─────────────────────────────
     indicators = {
         "RSI": round(rsi, 2),
@@ -759,6 +969,10 @@ def calculate_signal(df, mtf_score_override=None):
         "EMA20": round(ema20_val, 5),
         "EMA50": round(ema50_val, 5),
         "EMA200": round(ema200_val, 5),
+        "EMA_Fast_Period": ema_fast_w,
+        "EMA_Mid_Period": ema_mid_w,
+        "EMA_Slow_Period": ema_slow_w,
+        "SMC_Note": smc_note,
     }
 
     score_detail = {
@@ -786,7 +1000,7 @@ def calculate_signal(df, mtf_score_override=None):
 # ─────────────────────────────────────────────
 def calculate_trade_decision(signal, score_detail, df, supports, resistances, trading_mode="Intraday"):
     if signal == "HOLD":
-        return "SKIP", "Sinyal HOLD — tidak ada setup", "#8b949e"
+        return "SKIP", "Sinyal HOLD — tidak ada setup", "#57606a"
 
     is_buy   = signal == "BUY"
     total    = score_detail.get("confidence", score_detail["total"])
@@ -834,9 +1048,9 @@ def calculate_trade_decision(signal, score_detail, df, supports, resistances, tr
         structure_ok = structure >= 8
 
     if total < min_score:
-        return "SKIP", f"Score {total}/100 di bawah minimum {min_score}", "#f85149"
+        return "SKIP", f"Score {total}/100 di bawah minimum {min_score}", "#cf222e"
     if rr_ratio < min_rr:
-        return "SKIP", f"RR {rr_ratio:.2f} terlalu kecil (min {min_rr})", "#f85149"
+        return "SKIP", f"RR {rr_ratio:.2f} terlalu kecil (min {min_rr})", "#cf222e"
 
     reasons_wait = []
     if trend < trend_min:      reasons_wait.append("trend belum kuat")
@@ -845,13 +1059,13 @@ def calculate_trade_decision(signal, score_detail, df, supports, resistances, tr
     if not structure_ok and structure < 8: reasons_wait.append("jauh dari zona S/R")
 
     if total >= enter_score and rr_ratio >= enter_rr and len(reasons_wait) == 0:
-        return "ENTER", f"{trading_mode} ✅ Score {total}/100, RR 1:{rr_ratio:.2f}", "#3fb950"
+        return "ENTER", f"{trading_mode} ✅ Score {total}/100, RR 1:{rr_ratio:.2f}", "#1a7f37"
     if total >= enter_score and rr_ratio >= enter_rr and len(reasons_wait) <= 1:
         minor = reasons_wait[0] if reasons_wait else "konfirmasi parsial"
-        return "ENTER", f"Setup cukup ({minor}) — Score {total}, RR 1:{rr_ratio:.2f}", "#3fb950"
+        return "ENTER", f"Setup cukup ({minor}) — Score {total}, RR 1:{rr_ratio:.2f}", "#1a7f37"
     if reasons_wait:
-        return "WAIT", f"Tunggu: {', '.join(reasons_wait[:2])}", "#f0883e"
-    return "ENTER", f"Score {total}/100, RR 1:{rr_ratio:.1f}", "#3fb950"
+        return "WAIT", f"Tunggu: {', '.join(reasons_wait[:2])}", "#bc4c00"
+    return "ENTER", f"Score {total}/100, RR 1:{rr_ratio:.1f}", "#1a7f37"
 
 # ─────────────────────────────────────────────
 #  REAL MTF SCORE ENGINE
@@ -1057,7 +1271,7 @@ def generate_ai_reasoning(signal, decision, decision_reason, score_detail, indic
             "Total score belum cukup tinggi maupun cukup rendah untuk memicu sinyal BUY atau SELL.",
         ]
         conclusion = "Kesimpulan: Market belum menunjukkan arah yang jelas. Lebih baik tunggu konfirmasi candle berikutnya."
-        return points, conclusion, "#388bfd"
+        return points, conclusion, "#0969da"
 
     is_buy = signal == "BUY"
     direction_word = "bullish" if is_buy else "bearish"
@@ -1117,25 +1331,25 @@ def generate_ai_reasoning(signal, decision, decision_reason, score_detail, indic
     # Conclusion
     if decision == "ENTER":
         conclusion = f"Kesimpulan: Setup layak untuk {signal} sekarang. {decision_reason}."
-        color = "#3fb950"
+        color = "#1a7f37"
     elif decision == "WAIT":
         conclusion = f"Kesimpulan: Ada potensi {signal}, tapi belum ideal untuk masuk sekarang. {decision_reason}."
-        color = "#f0883e"
+        color = "#bc4c00"
     else:
         conclusion = f"Kesimpulan: Tidak disarankan masuk saat ini. {decision_reason}."
-        color = "#f85149"
+        color = "#cf222e"
 
     return points, conclusion, color
 
 # ─────────────────────────────────────────────
 #  CHART
 # ─────────────────────────────────────────────
-def build_chart(df, symbol, resistances=[], supports=[], zones=[]):
+def build_chart(df, symbol, resistances=[], supports=[], zones=[], smc=None, trading_mode="Intraday"):
     fig = make_subplots(rows=3, cols=1, shared_xaxes=True, vertical_spacing=0.03, row_heights=[0.6, 0.2, 0.2])
 
-    # Plot Order Block Zones (Supply/Demand)
+    # Plot Order Block Zones (Supply/Demand) — legacy rolling-max/min zones
     for zone in zones:
-        color = "rgba(248, 81, 73, 0.2)" if zone['type'] == 'supply' else "rgba(63, 185, 80, 0.2)"
+        color = "rgba(207, 34, 46, 0.15)" if zone['type'] == 'supply' else "rgba(26, 127, 55, 0.15)"
         fig.add_shape(
             type="rect",
             # Menggunakan timestamp pertama yang tersedia di dataframe agar zona terlukis dari awal
@@ -1146,43 +1360,101 @@ def build_chart(df, symbol, resistances=[], supports=[], zones=[]):
             row=1, col=1
         )
 
+    # ── SMC Zones: Order Block / FVG / BoS (porting Pine Script makuchaku & eFe) ──
+    if smc:
+        last_ts = df['timestamp'].iloc[-1]
+        n = len(df)
+
+        def _box_x(left_idx, right_idx):
+            x0 = df['timestamp'].iloc[max(0, min(left_idx, n - 1))]
+            # box "dibiarkan terbuka" sampai candle terakhir, mirip perilaku mitigasi di Pine
+            x1 = last_ts if right_idx >= n - 1 else df['timestamp'].iloc[min(right_idx + 3, n - 1)]
+            return x0, x1
+
+        # Order Blocks
+        for ob in smc.get("bull_ob", []):
+            x0, x1 = _box_x(ob["left"], ob["right"])
+            fig.add_shape(type="rect", x0=x0, x1=x1, y0=ob["bottom"], y1=ob["top"],
+                          fillcolor="rgba(26,127,55,0.18)", line=dict(color="rgba(26,127,55,0.6)", width=1),
+                          row=1, col=1)
+            fig.add_annotation(x=x1, y=ob["bottom"], text="OB+", showarrow=False, xanchor="right", yanchor="top",
+                                font=dict(size=9, color="#1a7f37"), row=1, col=1)
+        for ob in smc.get("bear_ob", []):
+            x0, x1 = _box_x(ob["left"], ob["right"])
+            fig.add_shape(type="rect", x0=x0, x1=x1, y0=ob["bottom"], y1=ob["top"],
+                          fillcolor="rgba(207,34,46,0.18)", line=dict(color="rgba(207,34,46,0.6)", width=1),
+                          row=1, col=1)
+            fig.add_annotation(x=x1, y=ob["top"], text="OB-", showarrow=False, xanchor="right", yanchor="bottom",
+                                font=dict(size=9, color="#cf222e"), row=1, col=1)
+
+        # Fair Value Gaps
+        for fvg in smc.get("bull_fvg", []):
+            x0, x1 = _box_x(fvg["left"], fvg["right"])
+            fig.add_shape(type="rect", x0=x0, x1=x1, y0=fvg["bottom"], y1=fvg["top"],
+                          fillcolor="rgba(130,80,223,0.12)", line=dict(color="rgba(130,80,223,0.5)", width=1, dash="dot"),
+                          row=1, col=1)
+            fig.add_annotation(x=x1, y=(fvg["top"] + fvg["bottom"]) / 2, text="FVG+", showarrow=False, xanchor="right",
+                                font=dict(size=8, color="#8250df"), row=1, col=1)
+        for fvg in smc.get("bear_fvg", []):
+            x0, x1 = _box_x(fvg["left"], fvg["right"])
+            fig.add_shape(type="rect", x0=x0, x1=x1, y0=fvg["bottom"], y1=fvg["top"],
+                          fillcolor="rgba(130,80,223,0.12)", line=dict(color="rgba(130,80,223,0.5)", width=1, dash="dot"),
+                          row=1, col=1)
+            fig.add_annotation(x=x1, y=(fvg["top"] + fvg["bottom"]) / 2, text="FVG-", showarrow=False, xanchor="right",
+                                font=dict(size=8, color="#8250df"), row=1, col=1)
+
+        # Break of Structure
+        for bos in smc.get("bos", []):
+            idx = min(bos["index"], n - 1)
+            x0 = df['timestamp'].iloc[idx]
+            color = "#1a7f37" if bos["type"] == "bull" else "#cf222e"
+            fig.add_shape(type="line", x0=x0, x1=last_ts, y0=bos["price"], y1=bos["price"],
+                          line=dict(color=color, width=1.5, dash="dash"), row=1, col=1)
+            fig.add_annotation(x=x0, y=bos["price"], text=f"BoS {'▲' if bos['type']=='bull' else '▼'}",
+                                showarrow=False, yanchor="bottom" if bos["type"] == "bull" else "top",
+                                font=dict(size=10, color=color, family="Arial Black"), row=1, col=1)
+
     fig.add_trace(go.Candlestick(
         x=df["timestamp"], open=df["open"], high=df["high"], low=df["low"], close=df["close"],
-        name="Price", increasing_line_color="#3fb950", decreasing_line_color="#f85149",
-        increasing_fillcolor="#0d2b1d", decreasing_fillcolor="#2d1b1b",
+        name="Price", increasing_line_color="#1a7f37", decreasing_line_color="#cf222e",
+        increasing_fillcolor="#dafbe1", decreasing_fillcolor="#ffebe9",
     ), row=1, col=1)
 
-    ema20 = ta.trend.EMAIndicator(df["close"], window=20).ema_indicator()
-    ema50 = ta.trend.EMAIndicator(df["close"], window=50).ema_indicator()
-    fig.add_trace(go.Scatter(x=df["timestamp"], y=ema20, name="EMA20", line=dict(color="#f0883e", width=1.5, dash="dot")), row=1, col=1)
-    fig.add_trace(go.Scatter(x=df["timestamp"], y=ema50, name="EMA50", line=dict(color="#388bfd", width=1.5, dash="dot")), row=1, col=1)
+    ema_fast_w, ema_mid_w = (5, 8) if trading_mode == "Scalping" else (20, 50)
+    ema20 = ta.trend.EMAIndicator(df["close"], window=ema_fast_w).ema_indicator()
+    ema50 = ta.trend.EMAIndicator(df["close"], window=ema_mid_w).ema_indicator()
+    fig.add_trace(go.Scatter(x=df["timestamp"], y=ema20, name=f"EMA{ema_fast_w}", line=dict(color="#bc4c00", width=1.5, dash="dot")), row=1, col=1)
+    fig.add_trace(go.Scatter(x=df["timestamp"], y=ema50, name=f"EMA{ema_mid_w}", line=dict(color="#0969da", width=1.5, dash="dot")), row=1, col=1)
+    if trading_mode == "Scalping":
+        ema13 = ta.trend.EMAIndicator(df["close"], window=13).ema_indicator()
+        fig.add_trace(go.Scatter(x=df["timestamp"], y=ema13, name="EMA13", line=dict(color="#8250df", width=1.5, dash="dot")), row=1, col=1)
 
     bb = ta.volatility.BollingerBands(df["close"], window=20)
-    fig.add_trace(go.Scatter(x=df["timestamp"], y=bb.bollinger_hband(), name="BB Upper", line=dict(color="#8b949e", width=1, dash="dash"), showlegend=False), row=1, col=1)
-    fig.add_trace(go.Scatter(x=df["timestamp"], y=bb.bollinger_lband(), name="BB Lower", line=dict(color="#8b949e", width=1, dash="dash"), fill="tonexty", fillcolor="rgba(139,148,158,0.05)", showlegend=False), row=1, col=1)
+    fig.add_trace(go.Scatter(x=df["timestamp"], y=bb.bollinger_hband(), name="BB Upper", line=dict(color="#57606a", width=1, dash="dash"), showlegend=False), row=1, col=1)
+    fig.add_trace(go.Scatter(x=df["timestamp"], y=bb.bollinger_lband(), name="BB Lower", line=dict(color="#57606a", width=1, dash="dash"), fill="tonexty", fillcolor="rgba(139,148,158,0.05)", showlegend=False), row=1, col=1)
 
     for r in resistances:
-        fig.add_hline(y=r, line_dash="dash", line_color="#f85149", opacity=0.6, row=1, col=1, annotation_text=f"R {r:.5f}", annotation_position="right")
+        fig.add_hline(y=r, line_dash="dash", line_color="#cf222e", opacity=0.6, row=1, col=1, annotation_text=f"R {r:.5f}", annotation_position="right")
     for s in supports:
-        fig.add_hline(y=s, line_dash="dash", line_color="#3fb950", opacity=0.6, row=1, col=1, annotation_text=f"S {s:.5f}", annotation_position="right")
+        fig.add_hline(y=s, line_dash="dash", line_color="#1a7f37", opacity=0.6, row=1, col=1, annotation_text=f"S {s:.5f}", annotation_position="right")
 
-    colors = ["#3fb950" if df["close"].iloc[i] >= df["open"].iloc[i] else "#f85149" for i in range(len(df))]
+    colors = ["#1a7f37" if df["close"].iloc[i] >= df["open"].iloc[i] else "#cf222e" for i in range(len(df))]
     fig.add_trace(go.Bar(x=df["timestamp"], y=df["volume"], name="Volume", marker_color=colors, opacity=0.7), row=2, col=1)
 
     rsi = ta.momentum.RSIIndicator(df["close"], window=14).rsi()
-    fig.add_trace(go.Scatter(x=df["timestamp"], y=rsi, name="RSI", line=dict(color="#d2a8ff", width=1.5)), row=3, col=1)
-    fig.add_hline(y=70, line_dash="dash", line_color="#f85149", opacity=0.5, row=3, col=1)
-    fig.add_hline(y=30, line_dash="dash", line_color="#3fb950", opacity=0.5, row=3, col=1)
+    fig.add_trace(go.Scatter(x=df["timestamp"], y=rsi, name="RSI", line=dict(color="#8250df", width=1.5)), row=3, col=1)
+    fig.add_hline(y=70, line_dash="dash", line_color="#cf222e", opacity=0.5, row=3, col=1)
+    fig.add_hline(y=30, line_dash="dash", line_color="#1a7f37", opacity=0.5, row=3, col=1)
 
     fig.update_layout(
-        plot_bgcolor="#0d1117", paper_bgcolor="#0d1117",
-        font=dict(color="#8b949e", size=11), height=580,
+        plot_bgcolor="#ffffff", paper_bgcolor="#ffffff",
+        font=dict(color="#57606a", size=11), height=580,
         margin=dict(l=0, r=0, t=30, b=0),
         legend=dict(orientation="h", yanchor="bottom", y=1.02, bgcolor="rgba(0,0,0,0)", font=dict(size=10)),
         xaxis_rangeslider_visible=False,
     )
-    fig.update_yaxes(gridcolor="#21262d", zerolinecolor="#21262d")
-    fig.update_xaxes(gridcolor="#21262d", zerolinecolor="#21262d")
+    fig.update_yaxes(gridcolor="#eaeef2", zerolinecolor="#eaeef2")
+    fig.update_xaxes(gridcolor="#eaeef2", zerolinecolor="#eaeef2")
     return fig
 
 # ─────────────────────────────────────────────
@@ -1251,21 +1523,21 @@ with tab1:
     with col_h1:
         st.markdown(f"""
         <div style="margin-bottom:8px;">
-            <span style="font-size:26px; font-weight:800; color:#e6edf3;">{symbol}</span>
-            <span style="font-size:12px; color:#8b949e; margin-left:12px;">MT5 FOREX</span>
+            <span style="font-size:26px; font-weight:800; color:#1f2328;">{symbol}</span>
+            <span style="font-size:12px; color:#57606a; margin-left:12px;">MT5 FOREX</span>
         </div>
         <div>
-            <span style="font-size:14px; color:#8b949e;">BID </span>
-            <span style="font-size:32px; font-weight:700; color:#3fb950;">{bid:{fmt}}</span>
-            <span style="font-size:14px; color:#8b949e; margin-left:16px;">ASK </span>
-            <span style="font-size:32px; font-weight:700; color:#f85149;">{ask:{fmt}}</span>
+            <span style="font-size:14px; color:#57606a;">BID </span>
+            <span style="font-size:32px; font-weight:700; color:#1a7f37;">{bid:{fmt}}</span>
+            <span style="font-size:14px; color:#57606a; margin-left:16px;">ASK </span>
+            <span style="font-size:32px; font-weight:700; color:#cf222e;">{ask:{fmt}}</span>
         </div>
         """, unsafe_allow_html=True)
     with col_h2:
         st.markdown(f"""
-        <div style="text-align:right; padding-top:12px; color:#8b949e; font-size:12px;">
+        <div style="text-align:right; padding-top:12px; color:#57606a; font-size:12px;">
             Last update<br>
-            <span style="color:#e6edf3;">{datetime.now().strftime('%H:%M:%S')}</span>
+            <span style="color:#1f2328;">{datetime.now().strftime('%H:%M:%S')}</span>
         </div>
         """, unsafe_allow_html=True)
 
@@ -1302,81 +1574,170 @@ with tab1:
             st.caption("📐 Formula aktif")
     with col_btn:
         do_refresh = st.button("🔄 Refresh Analisis", use_container_width=True, key="refresh_btn_mt5")
-        df = None
-        
+
     if 'df_data' not in st.session_state:
         st.session_state['df_data'] = None
 
     if do_refresh:
-        # 1. Tarik data baru
-        df = get_mt5_klines(symbol, interval_val, 200)
-    
-        if df is not None:
-            # 2. Panggil Brain Engine (Otomatis Heavy jika tombol ditekan)
-            # Kita set is_heavy=True karena pengguna baru saja menekan tombol Refresh
-            decision, reason = get_ai_brain_decision(df, "BOS/ChoCH Structure Analysis", is_heavy=True)
-            df = detect_price_structure(df)
-            signal = decision # Sinkronisasi variabel
-            # (previous command)
-            # generate_signals(
-            # df, 
-            # st.session_state.get('mode_input', 'Scalping'),  # Sesuai dengan key UI
-            # st.session_state.get('market_context', 'Neutral')
-        # )
-
-            def find_supply_demand_zones(df, n=10):
-                """Mencari area Supply (Resistansi) dan Demand (Support) berdasarkan swing terakhir"""
-                zones = []
-                # Deteksi swing high (Supply) dan swing low (Demand)
-                highs = df[df['high'] == df['high'].rolling(n*2+1, center=True).max()]
-                lows = df[df['low'] == df['low'].rolling(n*2+1, center=True).min()]
-    
-                # Ambil 3 swing terakhir untuk masing-masing
-                for _, row in highs.tail(3).iterrows():
-                    zones.append({'type': 'supply', 'price': row['high'], 'time': row['timestamp']})
-                for _, row in lows.tail(3).iterrows():
-                    zones.append({'type': 'demand', 'price': row['low'], 'time': row['timestamp']})
-                return zones
-
-            # 3. Simpan ke session_state (PENTING)
-            if 'decision' in locals(): # Cek apakah variabel ini berhasil dibuat
-                st.session_state['latest_decision'] = decision
-                st.session_state['latest_df'] = df
-                st.session_state['latest_signal'] = signal
-                st.session_state['latest_reason'] = reason
+        # Tarik data baru & simpan ke session_state
+        _new_df = get_mt5_klines(symbol, interval_val, 200)
+        if _new_df is not None:
+            _new_df = detect_price_structure(_new_df)
+            st.session_state['df_data'] = _new_df
         else:
             st.error("Gagal menarik data dari MT5.")
 
-    # 4. Tampilkan hasil (Di luar if do_refresh, gunakan pengecekan kunci agar aman)
-    if 'latest_signal' in st.session_state:
-        st.metric("Sinyal:", st.session_state['latest_signal'])
-        st.write(f"Analisis Engine: {st.session_state.get('latest_reason', '...')}")
+    # FIX BUG: sebelumnya `df` selalu di-reset ke None di setiap rerun kecuali tombol
+    # Refresh Analisis lagi ditekan. Akibatnya chart & panel sinyal hilang lagi begitu
+    # ada widget lain yang disentuh (checkbox Lite Mode, ganti Mode, dsb) — makanya
+    # kelihatannya "chart cuma muncul kalau tekan Refresh". Sekarang df dibaca dari
+    # session_state supaya analisis terakhir tetap tampil sampai di-refresh ulang.
+    df = st.session_state.get('df_data')
 
     # STREAMING_CHUNK:Refining adaptive layout...
     # 1. Posisi Mobile Mode yang strategis (Tepat di bawah Refresh)
     is_mobile = st.checkbox("📱 Lite Mode (Sembunyikan Chart)", False, help="Aktifkan ini jika di HP agar dashboard ringan")
+
+    # Hitung zona Supply/Demand & SMC (Order Block/FVG/BoS) sekali di sini —
+    # dipakai untuk gambar chart DAN sebagai bahan pertimbangan sinyal BUY/SELL di bawah.
+    zones = []
+    smc_zones = {"bull_ob": [], "bear_ob": [], "bull_fvg": [], "bear_fvg": [], "bos": []}
+    if df is not None and not df.empty:
+        zones = find_supply_demand_zones(df)
+        smc_zones = detect_smc_zones(df, pivot_lookup=1, max_boxes=8)
 
     col_chart, col_signal = st.columns([3, 1])
 
     with col_chart:
         st.markdown('<p class="section-header">Price Chart</p>', unsafe_allow_html=True)
         # 5. UI Adaptif (Bungkus chart)
-        df_chart = st.session_state.get('latest_df')
-        
+        # FIX: sebelumnya baca dari st.session_state['latest_df'] yang TIDAK PERNAH di-set
+        # di manapun di file ini -> chart selalu kosong / stuck di placeholder message.
+        # Sekarang pakai df yang sudah dipersist di session_state di atas.
+        df_chart = df
+
         if df_chart is not None and not df_chart.empty:
             # LOGIKA ADAPTIF: Chart hanya di-render jika Lite Mode OFF
             if not is_mobile:
-                zones = find_supply_demand_zones(df_chart)
-                fig = build_chart(df_chart, symbol, resistances, supports, zones=zones)
+                fig = build_chart(df_chart, symbol, resistances, supports, zones=zones, smc=smc_zones, trading_mode=trading_mode)
                 st.plotly_chart(fig, use_container_width=True)
+
+                # Ringkasan SMC singkat di bawah chart
+                n_bull_ob, n_bear_ob = len(smc_zones["bull_ob"]), len(smc_zones["bear_ob"])
+                n_fvg = len(smc_zones["bull_fvg"]) + len(smc_zones["bear_fvg"])
+                last_bos = smc_zones["bos"][-1] if smc_zones["bos"] else None
+                bos_txt = f"BoS terakhir: {'🟢 Bullish' if last_bos['type']=='bull' else '🔴 Bearish'}" if last_bos else "BoS: belum ada"
+                st.caption(f"🟩 {n_bull_ob} Bull OB · 🟥 {n_bear_ob} Bear OB · 🟪 {n_fvg} FVG · {bos_txt}")
             else:
                 st.info("📱 Lite Mode Aktif: Chart disembunyikan untuk performa.")
         else:
         # Jika data belum ada, tampilkan pesan ramah (bukan error)
             st.info("👈 Tekan tombol 'Refresh Analisis' di samping untuk memuat chart.")
+        
+        # Trading Plan — Gemini yang kasih level, formula hitung lot/PnL
+        with trading_plan_container:
+            st.markdown("---")
+            st.markdown('<p class="section-header">📋 Trading Plan</p>', unsafe_allow_html=True)
 
-    # Placeholder container for layout balance
-    trading_plan_container = st.container()
+            col_m1, col_m2 = st.columns([1, 1])
+            with col_m1:
+                modal = st.number_input("💵 Modal (USD)", min_value=1.0, value=100.0, step=10.0, format="%.2f")
+            with col_m2:
+                leverage = st.selectbox("⚡ Leverage", [1, 10, 50, 100, 200, 500], index=3)
+
+            _has_plan = df is not None and gemini_data and gemini_data.get("ai_active") and ai_action in ("BUY","SELL")
+            if _has_plan:
+                # Level dari Gemini atau Formula (sama struktur datanya)
+                _plan_src = gemini_data.get("source","gemini")
+                _plan_lbl = "✨ Level dari Gemini AI" if _plan_src=="gemini" else "📐 Level dari Formula"
+                g_entry = gemini_data["entry"]
+                g_tp1   = gemini_data["tp1"]
+                g_tp2   = gemini_data["tp2"]
+                g_sl    = gemini_data["sl"]
+
+                # Hitung pip size
+                pip_size = 0.01 if "JPY" in symbol else 1.0 if "XAU" in symbol or "GOL" in symbol else 0.0001
+                pip_mult = 100 if "JPY" in symbol else 1.0 if "XAU" in symbol or "GOL" in symbol else 10000
+
+                sl_pips  = round(abs(g_entry - g_sl) * pip_mult, 1)
+                tp1_pips = round(abs(g_tp1 - g_entry) * pip_mult, 1)
+                tp2_pips = round(abs(g_tp2 - g_entry) * pip_mult, 1)
+                rr_ratio = round(tp1_pips / sl_pips, 2) if sl_pips > 0 else 0
+
+                # Hitung lot size & PnL
+                pip_value  = 10.0  # ~$10 per pip per lot standar XAUUSD
+                lot_size   = round(modal / (sl_pips * pip_value * leverage) * leverage, 2) if sl_pips > 0 else 0.01
+                lot_size   = max(0.01, min(lot_size, 10.0))
+                profit_tp1 = round(tp1_pips * pip_value * lot_size, 2)
+                profit_tp2 = round(tp2_pips * pip_value * lot_size, 2)
+                loss_sl    = round(sl_pips  * pip_value * lot_size, 2)
+
+                rr_color     = "#1a7f37" if rr_ratio >= 1.0 else "#bc4c00" if rr_ratio >= 0.5 else "#cf222e"
+                action_color = "#1a7f37" if ai_action == "BUY" else "#cf222e"
+                action_emoji = "🟢" if ai_action == "BUY" else "🔴"
+
+                col_p1, col_p2, col_p3 = st.columns(3)
+                with col_p1:
+                    st.markdown(f"""
+                    <div class="tp-card">
+                        <p style="color:#8250df; font-size:11px; text-transform:uppercase; letter-spacing:1px; margin:0 0 12px 0;">✨ Level dari Gemini AI</p>
+                        <div class="tp-row"><span class="tp-label">Posisi</span><span class="tp-value" style="color:{action_color};">{action_emoji} {ai_action}</span></div>
+                        <div class="tp-row"><span class="tp-label">Entry</span><span class="tp-value tp-yellow">{g_entry:.5f}</span></div>
+                        <div class="tp-row"><span class="tp-label">Stop Loss</span><span class="tp-value tp-red">{g_sl:.5f} ({sl_pips} pips)</span></div>
+                        <div class="tp-row"><span class="tp-label">TP 1</span><span class="tp-value tp-green">{g_tp1:.5f} (+{tp1_pips} pips)</span></div>
+                        <div class="tp-row"><span class="tp-label">TP 2</span><span class="tp-value tp-green">{g_tp2:.5f} (+{tp2_pips} pips)</span></div>
+                    </div>
+                    """, unsafe_allow_html=True)
+                with col_p2:
+                    st.markdown(f"""
+                    <div class="tp-card">
+                        <p style="color:#57606a; font-size:11px; text-transform:uppercase; letter-spacing:1px; margin:0 0 12px 0;">Risk & Reward</p>
+                        <div class="tp-row"><span class="tp-label">R/R Ratio</span><span class="tp-value" style="color:{rr_color};">1 : {rr_ratio}</span></div>
+                        <div class="tp-row"><span class="tp-label">Modal</span><span class="tp-value">${modal:,.2f}</span></div>
+                        <div class="tp-row"><span class="tp-label">Lot Size</span><span class="tp-value">{lot_size}</span></div>
+                        <div class="tp-row"><span class="tp-label">Leverage</span><span class="tp-value">1:{leverage}</span></div>
+                        <div class="tp-row"><span class="tp-label">AI Confidence</span><span class="tp-value" style="color:{conf_bar_color if gemini_data else '#57606a'};">{gemini_data.get("confidence",0)}%</span></div>
+                    </div>
+                    """, unsafe_allow_html=True)
+                with col_p3:
+                    st.markdown(f"""
+                    <div class="tp-card">
+                        <p style="color:#57606a; font-size:11px; text-transform:uppercase; letter-spacing:1px; margin:0 0 12px 0;">Estimasi P&L</p>
+                        <div class="tp-row"><span class="tp-label">Profit TP1</span><span class="tp-value tp-green">+${profit_tp1}</span></div>
+                        <div class="tp-row"><span class="tp-label">Profit TP2</span><span class="tp-value tp-green">+${profit_tp2}</span></div>
+                        <div class="tp-row"><span class="tp-label">Max Loss (SL)</span><span class="tp-value tp-red">-${loss_sl}</span></div>
+                        <div class="tp-row"><span class="tp-label">Worth it?</span><span class="tp-value" style="color:{rr_color};">{"✅ YES" if rr_ratio >= 1.0 else "⚠️ MARGINAL" if rr_ratio >= 0.5 else "❌ SKIP"}</span></div>
+                    </div>
+                    """, unsafe_allow_html=True)
+
+                # Quick action note
+                dir_word = "BUY di" if ai_action == "BUY" else "SELL di"
+                st.markdown(f"""
+                <div style="background:#f6f8fa; border:1px solid #d0d7de; border-radius:8px; padding:12px; margin-top:8px;">
+                    <p style="color:#57606a; font-size:12px; margin:0;">
+                    ⚡ <strong style="color:#1f2328;">Quick Action:</strong>
+                    {dir_word} <strong style="color:#bc4c00;">{g_entry:.5f}</strong> →
+                    SL <strong style="color:#cf222e;">{g_sl:.5f}</strong> →
+                    TP1 <strong style="color:#1a7f37;">{g_tp1:.5f}</strong>
+                    {"→ TP2 " + f"<strong style='color:#1a7f37;'>{g_tp2:.5f}</strong>" if g_tp2 > 0 else ""} |
+                    Est. Profit TP1: <strong style="color:#1a7f37;">+${profit_tp1}</strong>
+                    </p>
+                </div>
+                """, unsafe_allow_html=True)
+
+            elif df is not None and ai_action == "HOLD":
+                _hold_reason = gemini_data.get("reason","") if gemini_data else formula_reason
+                _hold_src    = gemini_data.get("source","gemini") if gemini_data else "formula"
+                _hold_badge  = "🤖 Gemini" if _hold_src=="gemini" else "📐 Formula"
+                st.info(f"🔵 HOLD [{_hold_badge}] — {_hold_reason or 'Belum ada setup yang cukup bagus saat ini.'}")
+                if gemini_data and gemini_data.get("market_reco"):
+                    st.markdown(f"""
+                    <div style="background:#ddf4ff; border:1px solid #0969da; border-radius:8px; padding:10px 14px; margin-top:8px;">
+                        <p style="color:#0969da; font-size:13px; margin:0;">
+                        💡 <strong>Coba pair lain:</strong> {gemini_data["market_reco"]}
+                        </p>
+                    </div>
+                    """, unsafe_allow_html=True)
 
     with col_signal:
         st.markdown('<p class="section-header">🤖 AI Signal</p>', unsafe_allow_html=True)
@@ -1386,7 +1747,9 @@ with tab1:
             mtf_real         = calculate_mtf_score(symbol, current_tf_label, trading_mode)
 
             # Formula tetap jalan sebagai referensi & safety net
-            signal, reason, signals, indicators, confidence, score_detail = calculate_signal(df, mtf_score_override=mtf_real)
+            signal, reason, signals, indicators, confidence, score_detail = calculate_signal(
+                df, mtf_score_override=mtf_real, trading_mode=trading_mode, smc_zones=smc_zones
+            )
             formula_decision, formula_reason, formula_color = calculate_trade_decision(
                 signal, score_detail, df, supports, resistances, trading_mode
             )
@@ -1436,10 +1799,10 @@ with tab1:
                     if gemini_data is None or not gemini_data.get("ai_active"):
                         # Gemini error/limit → fallback formula
                         st.warning("⚠️ Gemini tidak merespons / kena limit — Formula Engine aktif.")
-                        gemini_data = formula_signal_engine(df, symbol, bid, digits)
+                        gemini_data = formula_signal_engine(df, symbol, bid, digits, trading_mode=trading_mode, smc_zones=smc_zones)
                 else:
                     # Toggle off / Gemini tidak aktif → langsung formula
-                    gemini_data = formula_signal_engine(df, symbol, bid, digits)
+                    gemini_data = formula_signal_engine(df, symbol, bid, digits, trading_mode=trading_mode, smc_zones=smc_zones)
 
                 # Simpan hasil ke session state
                 if gemini_data:
@@ -1460,30 +1823,30 @@ with tab1:
                 ai_tp1       = gemini_data["tp1"]
                 ai_tp2       = gemini_data["tp2"]
                 ai_sl        = gemini_data["sl"]
-                action_color = "#3fb950" if ai_action=="BUY" else "#f85149" if ai_action=="SELL" else "#388bfd"
+                action_color = "#1a7f37" if ai_action=="BUY" else "#cf222e" if ai_action=="SELL" else "#0969da"
                 action_emoji = "🟢" if ai_action=="BUY" else "🔴" if ai_action=="SELL" else "🔵"
-                action_bg    = "rgba(63,185,80,0.12)" if ai_action=="BUY" else "rgba(248,81,73,0.12)" if ai_action=="SELL" else "rgba(56,139,253,0.08)"
-                conf_bar_color = "#3fb950" if ai_conf >= 70 else "#f0883e" if ai_conf >= 50 else "#f85149"
+                action_bg    = "#dafbe1" if ai_action=="BUY" else "#ffebe9" if ai_action=="SELL" else "#ddf4ff"
+                conf_bar_color = "#1a7f37" if ai_conf >= 70 else "#bc4c00" if ai_conf >= 50 else "#cf222e"
 
                 st.markdown(f"""
                 <div style="background:{action_bg}; border:1px solid {action_color};
                      border-left:5px solid {action_color}; border-radius:10px; padding:20px; text-align:center;">
-                    <p style="color:#8b949e; font-size:10px; text-transform:uppercase; letter-spacing:2px; margin:0;">🤖 Gemini AI Decision</p>
+                    <p style="color:#57606a; font-size:10px; text-transform:uppercase; letter-spacing:2px; margin:0;">🤖 Gemini AI Decision</p>
                     <p style="font-size:36px; font-weight:900; color:{action_color}; margin:8px 0; letter-spacing:3px;">{action_emoji} {ai_action}</p>
-                    <p style="color:#c9d1d9; font-size:13px; margin:0 0 12px 0;">{ai_reason}</p>
+                    <p style="color:#33393f; font-size:13px; margin:0 0 12px 0;">{ai_reason}</p>
                     <div class="strength-bar-container">
                         <div class="strength-bar-fill" style="width:{ai_conf}%; background:{conf_bar_color};"></div>
                     </div>
-                    <p style="color:#8b949e; font-size:11px; margin:4px 0 0 0;">AI Confidence: {ai_conf}%</p>
+                    <p style="color:#57606a; font-size:11px; margin:4px 0 0 0;">AI Confidence: {ai_conf}%</p>
                 </div>
                 """, unsafe_allow_html=True)
 
                 # Market reco jika ada
                 if ai_reco:
                     st.markdown(f"""
-                    <div style="background:#1b1f2d; border:1px solid #388bfd; border-radius:8px;
+                    <div style="background:#ddf4ff; border:1px solid #0969da; border-radius:8px;
                          padding:10px 14px; margin-top:10px;">
-                        <p style="color:#388bfd; font-size:12px; margin:0;">
+                        <p style="color:#0969da; font-size:12px; margin:0;">
                         💡 <strong>Rekomendasi AI:</strong> {ai_reco}
                         </p>
                     </div>
@@ -1493,24 +1856,24 @@ with tab1:
                 if ai_action != "HOLD":
                     st.markdown("<br>", unsafe_allow_html=True)
                     st.markdown('<p class="section-header">🎯 Level dari Gemini AI</p>', unsafe_allow_html=True)
-                    tp_color  = "#3fb950" if ai_action == "BUY" else "#f85149"
-                    sl_color  = "#f85149" if ai_action == "BUY" else "#3fb950"
+                    tp_color  = "#1a7f37" if ai_action == "BUY" else "#cf222e"
+                    sl_color  = "#cf222e" if ai_action == "BUY" else "#1a7f37"
                     st.markdown(f"""
                     <div class="tp-card">
                         <div class="tp-row"><span class="tp-label">Entry</span><span class="tp-value tp-yellow">{ai_entry:.5f}</span></div>
                         <div class="tp-row"><span class="tp-label">TP 1</span><span class="tp-value" style="color:{tp_color};">{ai_tp1:.5f}</span></div>
                         <div class="tp-row"><span class="tp-label">TP 2</span><span class="tp-value" style="color:{tp_color};">{ai_tp2:.5f}</span></div>
                         <div class="tp-row"><span class="tp-label">Stop Loss</span><span class="tp-value" style="color:{sl_color};">{ai_sl:.5f}</span></div>
-                        <div class="tp-row"><span class="tp-label">Formula Ref</span><span class="tp-value" style="color:#8b949e; font-size:11px;">{signal} | Score {score_detail["total"]}/100</span></div>
+                        <div class="tp-row"><span class="tp-label">Formula Ref</span><span class="tp-value" style="color:#57606a; font-size:11px;">{signal} | Score {score_detail["total"]}/100</span></div>
                     </div>
                     """, unsafe_allow_html=True)
 
             else:
                 # Fallback ke formula kalau Gemini tidak aktif
-                action_color = "#3fb950" if signal=="BUY" else "#f85149" if signal=="SELL" else "#388bfd"
+                action_color = "#1a7f37" if signal=="BUY" else "#cf222e" if signal=="SELL" else "#0969da"
                 sig_class    = f"signal-{signal.lower()}"
                 dec_emoji    = "🟢" if formula_decision=="ENTER" else "🟡" if formula_decision=="WAIT" else "🔴"
-                dec_bg       = "rgba(63,185,80,0.12)" if formula_decision=="ENTER" else "rgba(240,136,62,0.12)" if formula_decision=="WAIT" else "rgba(248,81,73,0.08)"
+                dec_bg       = "#dafbe1" if formula_decision=="ENTER" else "#fff8e6" if formula_decision=="WAIT" else "#ffebe9"
                 st.markdown(f"""
                 <div class="{sig_class}">
                     <p class="signal-text">{"🟢" if signal=="BUY" else "🔴" if signal=="SELL" else "🔵"} {signal}</p>
@@ -1518,18 +1881,18 @@ with tab1:
                     <div class="strength-bar-container">
                         <div class="strength-bar-fill" style="width:{confidence}%; background:{action_color};"></div>
                     </div>
-                    <p style="color:#8b949e; font-size:11px;">Score: {score_detail["total"]}/100 | Confidence: {confidence}%</p>
+                    <p style="color:#57606a; font-size:11px;">Score: {score_detail["total"]}/100 | Confidence: {confidence}%</p>
                     <div style="margin-top:14px;background:{dec_bg};border:1px solid {formula_color};border-radius:6px;padding:10px 12px;text-align:center;">
                         <p style="font-size:18px;font-weight:900;color:{formula_color};margin:0;">{dec_emoji} {formula_decision}</p>
-                        <p style="color:#8b949e;font-size:11px;margin:4px 0 0 0;">{formula_reason}</p>
+                        <p style="color:#57606a;font-size:11px;margin:4px 0 0 0;">{formula_reason}</p>
                     </div>
                 </div>
-                <div style="background:#161b22;border:1px solid #30363d;border-radius:8px;padding:10px;margin-top:8px;text-align:center;">
-                    <p style="color:#8b949e;font-size:11px;margin:0;">✨ Tambahkan GEMINI_API_KEY di secrets.toml untuk AI penuh</p>
+                <div style="background:#f6f8fa;border:1px solid #d0d7de;border-radius:8px;padding:10px;margin-top:8px;text-align:center;">
+                    <p style="color:#57606a;font-size:11px;margin:0;">✨ Tambahkan GEMINI_API_KEY di secrets.toml untuk AI penuh</p>
                 </div>
                 """, unsafe_allow_html=True)
                 # Fallback: pakai formula engine (bukan pesan error)
-                gemini_data = formula_signal_engine(df, symbol, bid, digits)
+                gemini_data = formula_signal_engine(df, symbol, bid, digits, trading_mode=trading_mode, smc_zones=smc_zones)
                 if gemini_data:
                     gemini_data["_ts"] = datetime.now().strftime("%H:%M:%S")
                     st.session_state["gemini_result_mt5"] = gemini_data
@@ -1538,7 +1901,7 @@ with tab1:
                     ai_tp1    = gemini_data["tp1"]
                     ai_tp2    = gemini_data["tp2"]
                     ai_sl     = gemini_data["sl"]
-                    conf_bar_color = "#f0883e"
+                    conf_bar_color = "#bc4c00"
                     # Re-render dengan formula data
                     st.rerun()
                 else:
@@ -1553,19 +1916,19 @@ with tab1:
             st.markdown('<p class="section-header">📊 Formula Reference</p>', unsafe_allow_html=True)
             score_direction = 1 if signal != "SELL" else -1
             score_rows = [
-                ("Trend",     score_detail["trend"] if score_direction>0 else score_detail["trend_max"]-score_detail["trend"],         score_detail["trend_max"],    "#388bfd"),
-                ("Momentum",  score_detail["momentum"] if score_direction>0 else score_detail["momentum_max"]-score_detail["momentum"], score_detail["momentum_max"], "#d2a8ff"),
-                ("Structure", score_detail["structure"] if score_direction>0 else score_detail["structure_max"]-score_detail["structure"], score_detail["structure_max"],"#f0883e"),
-                ("MTF",       score_detail["mtf"] if score_direction>0 else score_detail["mtf_max"]-score_detail["mtf"],               score_detail["mtf_max"],      "#79c0ff"),
-                ("Volume",    score_detail["volume"], score_detail["volume_max"], "#56d364"),
+                ("Trend",     score_detail["trend"] if score_direction>0 else score_detail["trend_max"]-score_detail["trend"],         score_detail["trend_max"],    "#0969da"),
+                ("Momentum",  score_detail["momentum"] if score_direction>0 else score_detail["momentum_max"]-score_detail["momentum"], score_detail["momentum_max"], "#8250df"),
+                ("Structure", score_detail["structure"] if score_direction>0 else score_detail["structure_max"]-score_detail["structure"], score_detail["structure_max"],"#bc4c00"),
+                ("MTF",       score_detail["mtf"] if score_direction>0 else score_detail["mtf_max"]-score_detail["mtf"],               score_detail["mtf_max"],      "#0969da"),
+                ("Volume",    score_detail["volume"], score_detail["volume_max"], "#2da44e"),
             ]
             for lbl, val, mx, bc in score_rows:
                 pct = int(val/mx*100)
                 st.markdown(f"""
                 <div style="margin-bottom:6px;">
                     <div style="display:flex;justify-content:space-between;margin-bottom:2px;">
-                        <span style="color:#8b949e;font-size:11px;">{lbl}</span>
-                        <span style="color:#e6edf3;font-size:11px;font-weight:700;">{val}/{mx}</span>
+                        <span style="color:#57606a;font-size:11px;">{lbl}</span>
+                        <span style="color:#1f2328;font-size:11px;font-weight:700;">{val}/{mx}</span>
                     </div>
                     <div class="strength-bar-container">
                         <div class="strength-bar-fill" style="width:{pct}%;background:{bc};"></div>
@@ -1576,115 +1939,10 @@ with tab1:
             st.markdown("<br>", unsafe_allow_html=True)
             st.markdown('<p class="section-header">Support & Resistance</p>', unsafe_allow_html=True)
             for r in resistances:
-                st.markdown(f'<div class="sr-level sr-resistance"><span style="color:#8b949e;">R</span><span style="color:#f85149;font-weight:700;">{r:.5f}</span></div>', unsafe_allow_html=True)
-            st.markdown(f'<div style="text-align:center;padding:4px;color:#e6edf3;font-size:12px;font-weight:700;">── Now: {bid:{fmt}} ──</div>', unsafe_allow_html=True)
+                st.markdown(f'<div class="sr-level sr-resistance"><span style="color:#57606a;">R</span><span style="color:#cf222e;font-weight:700;">{r:.5f}</span></div>', unsafe_allow_html=True)
+            st.markdown(f'<div style="text-align:center;padding:4px;color:#1f2328;font-size:12px;font-weight:700;">── Now: {bid:{fmt}} ──</div>', unsafe_allow_html=True)
             for s in supports:
-                st.markdown(f'<div class="sr-level sr-support"><span style="color:#8b949e;">S</span><span style="color:#3fb950;font-weight:700;">{s:.5f}</span></div>', unsafe_allow_html=True)
-
-    # Trading Plan — Gemini yang kasih level, formula hitung lot/PnL
-    with trading_plan_container:
-        st.markdown("---")
-        st.markdown('<p class="section-header">📋 Trading Plan</p>', unsafe_allow_html=True)
-
-        col_m1, col_m2 = st.columns([1, 1])
-        with col_m1:
-            modal = st.number_input("💵 Modal (USD)", min_value=1.0, value=100.0, step=10.0, format="%.2f")
-        with col_m2:
-            leverage = st.selectbox("⚡ Leverage", [1, 10, 50, 100, 200, 500], index=3)
-
-        _has_plan = df is not None and gemini_data and gemini_data.get("ai_active") and ai_action in ("BUY","SELL")
-        if _has_plan:
-            # Level dari Gemini atau Formula (sama struktur datanya)
-            _plan_src = gemini_data.get("source","gemini")
-            _plan_lbl = "✨ Level dari Gemini AI" if _plan_src=="gemini" else "📐 Level dari Formula"
-            g_entry = gemini_data["entry"]
-            g_tp1   = gemini_data["tp1"]
-            g_tp2   = gemini_data["tp2"]
-            g_sl    = gemini_data["sl"]
-
-            # Hitung pip size
-            pip_size = 0.01 if "JPY" in symbol else 1.0 if "XAU" in symbol or "GOL" in symbol else 0.0001
-            pip_mult = 100 if "JPY" in symbol else 1.0 if "XAU" in symbol or "GOL" in symbol else 10000
-
-            sl_pips  = round(abs(g_entry - g_sl) * pip_mult, 1)
-            tp1_pips = round(abs(g_tp1 - g_entry) * pip_mult, 1)
-            tp2_pips = round(abs(g_tp2 - g_entry) * pip_mult, 1)
-            rr_ratio = round(tp1_pips / sl_pips, 2) if sl_pips > 0 else 0
-
-            # Hitung lot size & PnL
-            pip_value  = 10.0  # ~$10 per pip per lot standar XAUUSD
-            lot_size   = round(modal / (sl_pips * pip_value * leverage) * leverage, 2) if sl_pips > 0 else 0.01
-            lot_size   = max(0.01, min(lot_size, 10.0))
-            profit_tp1 = round(tp1_pips * pip_value * lot_size, 2)
-            profit_tp2 = round(tp2_pips * pip_value * lot_size, 2)
-            loss_sl    = round(sl_pips  * pip_value * lot_size, 2)
-
-            rr_color     = "#3fb950" if rr_ratio >= 1.0 else "#f0883e" if rr_ratio >= 0.5 else "#f85149"
-            action_color = "#3fb950" if ai_action == "BUY" else "#f85149"
-            action_emoji = "🟢" if ai_action == "BUY" else "🔴"
-
-            col_p1, col_p2, col_p3 = st.columns(3)
-            with col_p1:
-                st.markdown(f"""
-                <div class="tp-card">
-                    <p style="color:#d2a8ff; font-size:11px; text-transform:uppercase; letter-spacing:1px; margin:0 0 12px 0;">✨ Level dari Gemini AI</p>
-                    <div class="tp-row"><span class="tp-label">Posisi</span><span class="tp-value" style="color:{action_color};">{action_emoji} {ai_action}</span></div>
-                    <div class="tp-row"><span class="tp-label">Entry</span><span class="tp-value tp-yellow">{g_entry:.5f}</span></div>
-                    <div class="tp-row"><span class="tp-label">Stop Loss</span><span class="tp-value tp-red">{g_sl:.5f} ({sl_pips} pips)</span></div>
-                    <div class="tp-row"><span class="tp-label">TP 1</span><span class="tp-value tp-green">{g_tp1:.5f} (+{tp1_pips} pips)</span></div>
-                    <div class="tp-row"><span class="tp-label">TP 2</span><span class="tp-value tp-green">{g_tp2:.5f} (+{tp2_pips} pips)</span></div>
-                </div>
-                """, unsafe_allow_html=True)
-            with col_p2:
-                st.markdown(f"""
-                <div class="tp-card">
-                    <p style="color:#8b949e; font-size:11px; text-transform:uppercase; letter-spacing:1px; margin:0 0 12px 0;">Risk & Reward</p>
-                    <div class="tp-row"><span class="tp-label">R/R Ratio</span><span class="tp-value" style="color:{rr_color};">1 : {rr_ratio}</span></div>
-                    <div class="tp-row"><span class="tp-label">Modal</span><span class="tp-value">${modal:,.2f}</span></div>
-                    <div class="tp-row"><span class="tp-label">Lot Size</span><span class="tp-value">{lot_size}</span></div>
-                    <div class="tp-row"><span class="tp-label">Leverage</span><span class="tp-value">1:{leverage}</span></div>
-                    <div class="tp-row"><span class="tp-label">AI Confidence</span><span class="tp-value" style="color:{conf_bar_color if gemini_data else '#8b949e'};">{gemini_data.get("confidence",0)}%</span></div>
-                </div>
-                """, unsafe_allow_html=True)
-            with col_p3:
-                st.markdown(f"""
-                <div class="tp-card">
-                    <p style="color:#8b949e; font-size:11px; text-transform:uppercase; letter-spacing:1px; margin:0 0 12px 0;">Estimasi P&L</p>
-                    <div class="tp-row"><span class="tp-label">Profit TP1</span><span class="tp-value tp-green">+${profit_tp1}</span></div>
-                    <div class="tp-row"><span class="tp-label">Profit TP2</span><span class="tp-value tp-green">+${profit_tp2}</span></div>
-                    <div class="tp-row"><span class="tp-label">Max Loss (SL)</span><span class="tp-value tp-red">-${loss_sl}</span></div>
-                    <div class="tp-row"><span class="tp-label">Worth it?</span><span class="tp-value" style="color:{rr_color};">{"✅ YES" if rr_ratio >= 1.0 else "⚠️ MARGINAL" if rr_ratio >= 0.5 else "❌ SKIP"}</span></div>
-                </div>
-                """, unsafe_allow_html=True)
-
-            # Quick action note
-            dir_word = "BUY di" if ai_action == "BUY" else "SELL di"
-            st.markdown(f"""
-            <div style="background:#161b22; border:1px solid #30363d; border-radius:8px; padding:12px; margin-top:8px;">
-                <p style="color:#8b949e; font-size:12px; margin:0;">
-                ⚡ <strong style="color:#e6edf3;">Quick Action:</strong>
-                {dir_word} <strong style="color:#f0883e;">{g_entry:.5f}</strong> →
-                SL <strong style="color:#f85149;">{g_sl:.5f}</strong> →
-                TP1 <strong style="color:#3fb950;">{g_tp1:.5f}</strong>
-                {"→ TP2 " + f"<strong style='color:#3fb950;'>{g_tp2:.5f}</strong>" if g_tp2 > 0 else ""} |
-                Est. Profit TP1: <strong style="color:#3fb950;">+${profit_tp1}</strong>
-                </p>
-            </div>
-            """, unsafe_allow_html=True)
-
-        elif df is not None and ai_action == "HOLD":
-            _hold_reason = gemini_data.get("reason","") if gemini_data else formula_reason
-            _hold_src    = gemini_data.get("source","gemini") if gemini_data else "formula"
-            _hold_badge  = "🤖 Gemini" if _hold_src=="gemini" else "📐 Formula"
-            st.info(f"🔵 HOLD [{_hold_badge}] — {_hold_reason or 'Belum ada setup yang cukup bagus saat ini.'}")
-            if gemini_data and gemini_data.get("market_reco"):
-                st.markdown(f"""
-                <div style="background:#1b1f2d; border:1px solid #388bfd; border-radius:8px; padding:10px 14px; margin-top:8px;">
-                    <p style="color:#388bfd; font-size:13px; margin:0;">
-                    💡 <strong>Coba pair lain:</strong> {gemini_data["market_reco"]}
-                    </p>
-                </div>
-                """, unsafe_allow_html=True)
+                st.markdown(f'<div class="sr-level sr-support"><span style="color:#57606a;">S</span><span style="color:#1a7f37;font-weight:700;">{s:.5f}</span></div>', unsafe_allow_html=True)
     
     # AI Reasoning — sekarang full dari Gemini
     if df is not None:
@@ -1693,17 +1951,17 @@ with tab1:
             if gemini_data and gemini_data.get("ai_active") and gemini_data.get("insights"):
                 st.markdown('<p class="section-header">🧠 Gemini AI Reasoning</p>', unsafe_allow_html=True)
                 insights_html = "".join([
-                    f'<li style="color:#c9d1d9;font-size:13px;margin-bottom:8px;line-height:1.6;">{p}</li>'
+                    f'<li style="color:#33393f;font-size:13px;margin-bottom:8px;line-height:1.6;">{p}</li>'
                     for p in gemini_data["insights"]
                 ])
-                action_c = "#3fb950" if gemini_data["action"]=="BUY" else "#f85149" if gemini_data["action"]=="SELL" else "#388bfd"
+                action_c = "#1a7f37" if gemini_data["action"]=="BUY" else "#cf222e" if gemini_data["action"]=="SELL" else "#0969da"
                 st.markdown(f"""
-                <div style="background:linear-gradient(135deg,#1a1a2e,#16213e);
-                     border:1px solid #0f3460; border-left:4px solid #d2a8ff;
+                <div style="background:linear-gradient(135deg,#f6f0ff,#eaf5ff);
+                     border:1px solid #d8c7f5; border-left:4px solid #8250df;
                      border-radius:8px; padding:18px;">
                     <ul style="margin:0 0 14px 0; padding-left:18px;">{insights_html}</ul>
                     <p style="color:{action_c}; font-size:14px; font-weight:700; margin:0;
-                       padding-top:10px; border-top:1px solid #0f3460;">
+                       padding-top:10px; border-top:1px solid #d8c7f5;">
                         {gemini_data["reason"]}
                     </p>
                 </div>
@@ -1724,15 +1982,15 @@ with tab1:
                 )
                 st.markdown('<p class="section-header">🧠 Formula Reasoning</p>', unsafe_allow_html=True)
                 points_html = "".join([
-                    f'<li style="color:#c9d1d9;font-size:13px;margin-bottom:6px;line-height:1.6;">{p}</li>'
+                    f'<li style="color:#33393f;font-size:13px;margin-bottom:6px;line-height:1.6;">{p}</li>'
                     for p in reasoning_points
                 ])
                 st.markdown(f"""
-                <div style="background:#161b22; border:1px solid #30363d;
+                <div style="background:#f6f8fa; border:1px solid #d0d7de;
                      border-left:4px solid {reasoning_color}; border-radius:8px; padding:18px;">
                     <ul style="margin:0 0 12px 0; padding-left:18px;">{points_html}</ul>
                     <p style="color:{reasoning_color}; font-size:14px; font-weight:700;
-                       margin:0; padding-top:10px; border-top:1px solid #21262d;">
+                       margin:0; padding-top:10px; border-top:1px solid #eaeef2;">
                         {reasoning_conclusion}
                     </p>
                 </div>
@@ -1743,7 +2001,7 @@ with tab1:
 # ─── TAB 2: MULTI TIMEFRAME ───
 with tab2:
     st.markdown('<p class="section-header">🕐 Multi-Timeframe Analysis</p>', unsafe_allow_html=True)
-    st.markdown(f"<p style='color:#8b949e; font-size:13px;'>Analisis {symbol} dari 3 timeframe sekaligus</p>", unsafe_allow_html=True)
+    st.markdown(f"<p style='color:#57606a; font-size:13px;'>Analisis {symbol} dari 3 timeframe sekaligus</p>", unsafe_allow_html=True)
 
     mtf_results = multi_timeframe_analysis(symbol)
 
@@ -1751,39 +2009,39 @@ with tab2:
     sell_count = sum(1 for _, s, _, _ in mtf_results if s == "SELL")
     hold_count = sum(1 for _, s, _, _ in mtf_results if s == "HOLD")
 
-    if buy_count >= 2: consensus_color = "#3fb950"; consensus_emoji = "🟢"; consensus_text = "STRONG BUY" if buy_count == 3 else "BUY"
-    elif sell_count >= 2: consensus_color = "#f85149"; consensus_emoji = "🔴"; consensus_text = "STRONG SELL" if sell_count == 3 else "SELL"
-    else: consensus_color = "#388bfd"; consensus_emoji = "🔵"; consensus_text = "MIXED / HOLD"
+    if buy_count >= 2: consensus_color = "#1a7f37"; consensus_emoji = "🟢"; consensus_text = "STRONG BUY" if buy_count == 3 else "BUY"
+    elif sell_count >= 2: consensus_color = "#cf222e"; consensus_emoji = "🔴"; consensus_text = "STRONG SELL" if sell_count == 3 else "SELL"
+    else: consensus_color = "#0969da"; consensus_emoji = "🔵"; consensus_text = "MIXED / HOLD"
 
     st.markdown(f"""
-    <div style="background:#161b22; border:1px solid #30363d; border-radius:12px; padding:24px; text-align:center; margin-bottom:24px;">
-        <p style="color:#8b949e; font-size:12px; text-transform:uppercase; letter-spacing:2px; margin:0;">MTF Consensus</p>
+    <div style="background:#f6f8fa; border:1px solid #d0d7de; border-radius:12px; padding:24px; text-align:center; margin-bottom:24px;">
+        <p style="color:#57606a; font-size:12px; text-transform:uppercase; letter-spacing:2px; margin:0;">MTF Consensus</p>
         <p style="font-size:36px; font-weight:800; color:{consensus_color}; margin:8px 0;">{consensus_emoji} {consensus_text}</p>
-        <p style="color:#8b949e; font-size:12px;">{buy_count} BUY · {sell_count} SELL · {hold_count} HOLD</p>
+        <p style="color:#57606a; font-size:12px;">{buy_count} BUY · {sell_count} SELL · {hold_count} HOLD</p>
     </div>
     """, unsafe_allow_html=True)
 
     col_mtf1, col_mtf2, col_mtf3 = st.columns(3)
     cols = [col_mtf1, col_mtf2, col_mtf3]
     for i, (label, sig, reason, confidence) in enumerate(mtf_results):
-        color = "#3fb950" if sig == "BUY" else "#f85149" if sig == "SELL" else "#388bfd"
+        color = "#1a7f37" if sig == "BUY" else "#cf222e" if sig == "SELL" else "#0969da"
         emoji = "🟢" if sig == "BUY" else "🔴" if sig == "SELL" else "🔵"
         with cols[i]:
             st.markdown(f"""
             <div class="mtf-card mtf-{sig.lower()}">
-                <p style="color:#8b949e; font-size:11px; text-transform:uppercase; letter-spacing:1px; margin:0;">{label}</p>
+                <p style="color:#57606a; font-size:11px; text-transform:uppercase; letter-spacing:1px; margin:0;">{label}</p>
                 <p style="font-size:22px; font-weight:800; color:{color}; margin:8px 0;">{emoji} {sig}</p>
                 <div class="strength-bar-container"><div class="strength-bar-fill" style="width:{confidence}%; background:{color};"></div></div>
-                <p style="color:#8b949e; font-size:11px; margin:4px 0;">Confidence: {confidence}%</p>
-                <p style="color:#8b949e; font-size:11px; margin:0;">{reason}</p>
+                <p style="color:#57606a; font-size:11px; margin:4px 0;">Confidence: {confidence}%</p>
+                <p style="color:#57606a; font-size:11px; margin:0;">{reason}</p>
             </div>
             """, unsafe_allow_html=True)
 
     st.markdown("<br>", unsafe_allow_html=True)
     st.markdown("""
-    <div style="background:#161b22; border:1px solid #30363d; border-radius:8px; padding:16px;">
-        <p style="color:#8b949e; font-size:12px; margin:0;">
-        💡 <strong style="color:#e6edf3;">Cara baca MTF:</strong> Kalau 1H + 4H + 1D semua searah → sinyal sangat kuat.
+    <div style="background:#f6f8fa; border:1px solid #d0d7de; border-radius:8px; padding:16px;">
+        <p style="color:#57606a; font-size:12px; margin:0;">
+        💡 <strong style="color:#1f2328;">Cara baca MTF:</strong> Kalau 1H + 4H + 1D semua searah → sinyal sangat kuat.
         Konfirmasi minimal 2 dari 3 timeframe sebelum entry.
         </p>
     </div>
@@ -1799,18 +2057,18 @@ with tab3:
     if all_prices:
         col_mw1, col_mw2 = st.columns(2)
         for i, p in enumerate(all_prices):
-            change_color = "#3fb950" if p["change"] >= 0 else "#f85149"
+            change_color = "#1a7f37" if p["change"] >= 0 else "#cf222e"
             arrow = "▲" if p["change"] >= 0 else "▼"
             fmt = f",.{p['digits']}f"
             card = f"""
             <div class="pair-card">
                 <div>
-                    <span style="color:#e6edf3; font-weight:700; font-size:15px;">{p["symbol"]}</span>
+                    <span style="color:#1f2328; font-weight:700; font-size:15px;">{p["symbol"]}</span>
                 </div>
                 <div style="text-align:center;">
-                    <span style="color:#3fb950; font-size:13px;">{p["bid"]:{fmt}}</span>
-                    <span style="color:#8b949e; font-size:11px;"> / </span>
-                    <span style="color:#f85149; font-size:13px;">{p["ask"]:{fmt}}</span>
+                    <span style="color:#1a7f37; font-size:13px;">{p["bid"]:{fmt}}</span>
+                    <span style="color:#57606a; font-size:11px;"> / </span>
+                    <span style="color:#cf222e; font-size:13px;">{p["ask"]:{fmt}}</span>
                 </div>
                 <div style="text-align:right;">
                     <span style="color:{change_color}; font-size:13px; font-weight:700;">{arrow} {abs(p["change"]):.4f}%</span>
@@ -1827,7 +2085,7 @@ with tab3:
 # ─── TAB 4: BACKTESTING ───
 with tab4:
     st.markdown('<p class="section-header">🧪 Backtesting Engine</p>', unsafe_allow_html=True)
-    st.markdown("<p style='color:#8b949e; font-size:13px;'>Simulasi signal engine di data historis — lihat win rate, profit/loss, dan RR ratio.</p>", unsafe_allow_html=True)
+    st.markdown("<p style='color:#57606a; font-size:13px;'>Simulasi signal engine di data historis — lihat win rate, profit/loss, dan RR ratio.</p>", unsafe_allow_html=True)
 
     col_bt1, col_bt2, col_bt3 = st.columns(3)
     with col_bt1:
@@ -1943,22 +2201,22 @@ with tab4:
                 avg_rr       = round(sum(t["rr"]  for t in trades) / total_trades, 2)
                 avg_score    = round(sum(t["score"] for t in trades) / total_trades, 1)
 
-                pnl_color = "#3fb950" if total_pnl >= 0 else "#f85149"
-                wr_color  = "#3fb950" if win_rate >= 55 else "#f0883e" if win_rate >= 45 else "#f85149"
+                pnl_color = "#1a7f37" if total_pnl >= 0 else "#cf222e"
+                wr_color  = "#1a7f37" if win_rate >= 55 else "#bc4c00" if win_rate >= 45 else "#cf222e"
 
                 st.markdown("<br>", unsafe_allow_html=True)
                 c1, c2, c3, c4, c5 = st.columns(5)
                 for col, label, val, color in [
-                    (c1, "Total Trade", str(total_trades), "#e6edf3"),
+                    (c1, "Total Trade", str(total_trades), "#1f2328"),
                     (c2, "Win Rate",    f"{win_rate}%",    wr_color),
                     (c3, "Total P&L",   f"{'+'if total_pnl>=0 else ''}{total_pnl}$", pnl_color),
-                    (c4, "Avg RR",      f"1:{avg_rr}",     "#388bfd"),
-                    (c5, "Avg Score",   f"{avg_score}/100","#d2a8ff"),
+                    (c4, "Avg RR",      f"1:{avg_rr}",     "#0969da"),
+                    (c5, "Avg Score",   f"{avg_score}/100","#8250df"),
                 ]:
                     with col:
                         st.markdown(f"""
-                        <div style="background:#161b22; border:1px solid #30363d; border-radius:8px; padding:14px; text-align:center;">
-                            <p style="color:#8b949e; font-size:11px; margin:0 0 6px 0; text-transform:uppercase;">{label}</p>
+                        <div style="background:#f6f8fa; border:1px solid #d0d7de; border-radius:8px; padding:14px; text-align:center;">
+                            <p style="color:#57606a; font-size:11px; margin:0 0 6px 0; text-transform:uppercase;">{label}</p>
                             <p style="color:{color}; font-size:22px; font-weight:800; margin:0;">{val}</p>
                         </div>
                         """, unsafe_allow_html=True)
@@ -1967,39 +2225,39 @@ with tab4:
                 col_wl1, col_wl2 = st.columns(2)
                 with col_wl1:
                     st.markdown(f"""
-                    <div style="background:#161b22; border:1px solid #30363d; border-radius:8px; padding:14px;">
-                        <p style="color:#8b949e; font-size:11px; text-transform:uppercase; margin:0 0 10px 0;">Win Summary</p>
-                        <div style="display:flex; justify-content:space-between; padding:4px 0;"><span style="color:#8b949e; font-size:12px;">Total Win</span><span style="color:#3fb950; font-weight:700;">{len(wins)} trade</span></div>
-                        <div style="display:flex; justify-content:space-between; padding:4px 0;"><span style="color:#8b949e; font-size:12px;">Avg Profit</span><span style="color:#3fb950; font-weight:700;">+${avg_win}</span></div>
-                        <div style="display:flex; justify-content:space-between; padding:4px 0;"><span style="color:#8b949e; font-size:12px;">Total Profit</span><span style="color:#3fb950; font-weight:700;">+${round(sum(t["pnl"] for t in wins),2)}</span></div>
+                    <div style="background:#f6f8fa; border:1px solid #d0d7de; border-radius:8px; padding:14px;">
+                        <p style="color:#57606a; font-size:11px; text-transform:uppercase; margin:0 0 10px 0;">Win Summary</p>
+                        <div style="display:flex; justify-content:space-between; padding:4px 0;"><span style="color:#57606a; font-size:12px;">Total Win</span><span style="color:#1a7f37; font-weight:700;">{len(wins)} trade</span></div>
+                        <div style="display:flex; justify-content:space-between; padding:4px 0;"><span style="color:#57606a; font-size:12px;">Avg Profit</span><span style="color:#1a7f37; font-weight:700;">+${avg_win}</span></div>
+                        <div style="display:flex; justify-content:space-between; padding:4px 0;"><span style="color:#57606a; font-size:12px;">Total Profit</span><span style="color:#1a7f37; font-weight:700;">+${round(sum(t["pnl"] for t in wins),2)}</span></div>
                     </div>
                     """, unsafe_allow_html=True)
                 with col_wl2:
                     st.markdown(f"""
-                    <div style="background:#161b22; border:1px solid #30363d; border-radius:8px; padding:14px;">
-                        <p style="color:#8b949e; font-size:11px; text-transform:uppercase; margin:0 0 10px 0;">Loss Summary</p>
-                        <div style="display:flex; justify-content:space-between; padding:4px 0;"><span style="color:#8b949e; font-size:12px;">Total Loss</span><span style="color:#f85149; font-weight:700;">{len(losses)} trade</span></div>
-                        <div style="display:flex; justify-content:space-between; padding:4px 0;"><span style="color:#8b949e; font-size:12px;">Avg Loss</span><span style="color:#f85149; font-weight:700;">${avg_loss}</span></div>
-                        <div style="display:flex; justify-content:space-between; padding:4px 0;"><span style="color:#8b949e; font-size:12px;">Total Loss</span><span style="color:#f85149; font-weight:700;">${round(sum(t["pnl"] for t in losses),2)}</span></div>
+                    <div style="background:#f6f8fa; border:1px solid #d0d7de; border-radius:8px; padding:14px;">
+                        <p style="color:#57606a; font-size:11px; text-transform:uppercase; margin:0 0 10px 0;">Loss Summary</p>
+                        <div style="display:flex; justify-content:space-between; padding:4px 0;"><span style="color:#57606a; font-size:12px;">Total Loss</span><span style="color:#cf222e; font-weight:700;">{len(losses)} trade</span></div>
+                        <div style="display:flex; justify-content:space-between; padding:4px 0;"><span style="color:#57606a; font-size:12px;">Avg Loss</span><span style="color:#cf222e; font-weight:700;">${avg_loss}</span></div>
+                        <div style="display:flex; justify-content:space-between; padding:4px 0;"><span style="color:#57606a; font-size:12px;">Total Loss</span><span style="color:#cf222e; font-weight:700;">${round(sum(t["pnl"] for t in losses),2)}</span></div>
                     </div>
                     """, unsafe_allow_html=True)
 
                 st.markdown("<br>", unsafe_allow_html=True)
                 st.markdown('<p class="section-header">Trade History</p>', unsafe_allow_html=True)
                 for t in reversed(trades[-30:]):
-                    oc = "#3fb950" if t["outcome"] == "WIN" else "#f85149"
-                    sc = "#3fb950" if t["signal"]  == "BUY" else "#f85149"
+                    oc = "#1a7f37" if t["outcome"] == "WIN" else "#cf222e"
+                    sc = "#1a7f37" if t["signal"]  == "BUY" else "#cf222e"
                     ps = "+" if t["pnl"] >= 0 else ""
                     st.markdown(f"""
                     <div style="display:flex; justify-content:space-between; align-items:center;
-                         padding:8px 12px; margin:3px 0; background:#161b22;
-                         border:1px solid #30363d; border-radius:6px; font-size:12px;">
-                        <span style="color:#8b949e; width:130px;">{t["timestamp"]}</span>
+                         padding:8px 12px; margin:3px 0; background:#f6f8fa;
+                         border:1px solid #d0d7de; border-radius:6px; font-size:12px;">
+                        <span style="color:#57606a; width:130px;">{t["timestamp"]}</span>
                         <span style="color:{sc}; font-weight:700; width:45px;">{t["signal"]}</span>
-                        <span style="color:#e6edf3; width:90px;">Entry: {t["entry"]:.5f}</span>
-                        <span style="color:#e6edf3; width:90px;">Exit: {t["exit"]:.5f}</span>
-                        <span style="color:#8b949e; width:60px;">RR 1:{t["rr"]}</span>
-                        <span style="color:#8b949e; width:60px;">Score: {t["score"]}</span>
+                        <span style="color:#1f2328; width:90px;">Entry: {t["entry"]:.5f}</span>
+                        <span style="color:#1f2328; width:90px;">Exit: {t["exit"]:.5f}</span>
+                        <span style="color:#57606a; width:60px;">RR 1:{t["rr"]}</span>
+                        <span style="color:#57606a; width:60px;">Score: {t["score"]}</span>
                         <span style="color:{oc}; font-weight:700; width:60px;">{t["outcome"]}</span>
                         <span style="color:{oc}; font-weight:700;">{ps}{t["pnl"]}$</span>
                     </div>
@@ -2023,15 +2281,15 @@ with tab5:
         
     if account:
         st.markdown(f"""
-        <div style="background:#161b22; border:1px solid #30363d; border-radius:8px; padding:16px;">
-            <p style="color:#8b949e; font-size:12px; margin:0;">
-            👤 <strong style="color:#e6edf3;">{account.name}</strong><br>
-            🏦 Server: <span style="color:#e6edf3;">{account.server}</span><br>
-            💰 Balance: <span style="color:#3fb950;">${account.balance:,.2f} {account.currency}</span><br>
-            📊 Leverage: <span style="color:#e6edf3;">1:{account.leverage}</span><br>
-            🔗 Status: <span style="color:#3fb950;">🟢 Connected</span><br>
-            ✨ Gemini: <span style="color:#e6edf3;">{"🟢 Aktif" if GEMINI_ENABLED else "🔴 Tidak aktif"}</span><br>
-            ⚙️ Version: <span style="color:#e6edf3;">v5.0 (3-Mode + Gemini Decision Engine)</span><br>
+        <div style="background:#f6f8fa; border:1px solid #d0d7de; border-radius:8px; padding:16px;">
+            <p style="color:#57606a; font-size:12px; margin:0;">
+            👤 <strong style="color:#1f2328;">{account.name}</strong><br>
+            🏦 Server: <span style="color:#1f2328;">{account.server}</span><br>
+            💰 Balance: <span style="color:#1a7f37;">${account.balance:,.2f} {account.currency}</span><br>
+            📊 Leverage: <span style="color:#1f2328;">1:{account.leverage}</span><br>
+            🔗 Status: <span style="color:#1a7f37;">🟢 Connected</span><br>
+            ✨ Gemini: <span style="color:#1f2328;">{"🟢 Aktif" if GEMINI_ENABLED else "🔴 Tidak aktif"}</span><br>
+            ⚙️ Version: <span style="color:#1f2328;">v5.5 (3-Mode + Gemini Decision Engine)</span><br>
             </p>
         </div>
         """, unsafe_allow_html=True)
